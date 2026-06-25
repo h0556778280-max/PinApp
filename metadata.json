@@ -1,0 +1,8 @@
+{
+  "name": "Remix: pinapp",
+  "description": "Let any installed app serve as your home screen",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
