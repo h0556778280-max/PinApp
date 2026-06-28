@@ -8,21 +8,20 @@ class HomeActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         
-        val targetPkg = NotificationHelper.getTargetPackage(this, TriggerType.HOME)
-        if (targetPkg != null) {
-            val launchIntent = NotificationHelper.getLaunchIntent(this, targetPkg)
-            if (launchIntent != null) {
-                launchIntent.addFlags(
-                    Intent.FLAG_ACTIVITY_NEW_TASK or 
-                    Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or 
-                    Intent.FLAG_ACTIVITY_NO_ANIMATION
-                )
-                try {
-                    startActivity(launchIntent)
-                    @Suppress("DEPRECATION")
-                    overridePendingTransition(0, 0)
-                } catch (e: Exception) {
-                    // Fallback to launching the package's default launcher if sub-activity failed
+        val launchIntent = NotificationHelper.getTriggerIntent(this, TriggerType.HOME)
+        if (launchIntent != null) {
+            launchIntent.addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or 
+                Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED or 
+                Intent.FLAG_ACTIVITY_NO_ANIMATION
+            )
+            try {
+                startActivity(launchIntent)
+                @Suppress("DEPRECATION")
+                overridePendingTransition(0, 0)
+            } catch (e: Exception) {
+                val targetPkg = NotificationHelper.getTargetPackage(this, TriggerType.HOME)
+                if (targetPkg != null) {
                     val pkg = if (targetPkg.contains("/")) targetPkg.split("/")[0] else targetPkg
                     val fallbackIntent = packageManager.getLaunchIntentForPackage(pkg)
                     if (fallbackIntent != null) {
@@ -35,10 +34,9 @@ class HomeActivity : ComponentActivity() {
                     } else {
                         launchSettings()
                     }
+                } else {
+                    launchSettings()
                 }
-            } else {
-                NotificationHelper.clearTargetPackage(this, TriggerType.HOME)
-                launchSettings()
             }
         } else {
             launchSettings()

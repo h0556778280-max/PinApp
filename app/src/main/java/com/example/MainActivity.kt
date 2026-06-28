@@ -15,11 +15,17 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
-import android.graphics.drawable.Icon
+import android.graphics.ImageDecoder
+import android.graphics.PorterDuff
+import android.graphics.PorterDuffXfermode
+import android.graphics.Rect
+import android.net.Uri
+import android.provider.MediaStore
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -42,17 +48,39 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.List
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.KeyboardArrowUp
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.Notifications
+import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.CheckCircle
+import android.widget.Toast
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.core.app.NotificationCompat
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
@@ -94,22 +122,45 @@ class AppsViewModel : ViewModel() {
     private val _isLoading = MutableStateFlow(true)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
 
-    fun loadApps(pm: PackageManager) {
+    private val _showSystemApps = MutableStateFlow(false)
+    val showSystemApps: StateFlow<Boolean> = _showSystemApps.asStateFlow()
+
+    fun setShowSystemApps(pm: PackageManager, show: Boolean) {
+        _showSystemApps.value = show
+        loadApps(pm, show)
+    }
+
+    fun loadApps(pm: PackageManager, showSystem: Boolean = false) {
+        _isLoading.value = true
         viewModelScope.launch(Dispatchers.IO) {
-            val mainIntent = Intent(Intent.ACTION_MAIN, null)
-            mainIntent.addCategory(Intent.CATEGORY_LAUNCHER)
-            
-            val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
-            val appList = resolveInfos.mapNotNull { ri ->
-                val pkg = ri.activityInfo.packageName
-                if (pkg == "com.google.android.GoogleCameraEng") return@mapNotNull null
+            val appList = if (showSystem) {
+                val installedApps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                installedApps.mapNotNull { appInfo ->
+                    val pkg = appInfo.packageName
+                    if (pkg == "com.google.android.GoogleCameraEng") return@mapNotNull null
+                    
+                    AppInfo(
+                        label = appInfo.loadLabel(pm).toString(),
+                        packageName = pkg,
+                        icon = appInfo.loadIcon(pm)
+                    )
+                }.sortedBy { it.label.lowercase() }
+            } else {
+                val mainIntent = Intent(Intent.ACTION_MAIN, null)
+                mainIntent.addCategory(Intent.CATEGORY_LAUNCHER)
                 
-                AppInfo(
-                    label = ri.loadLabel(pm).toString(),
-                    packageName = pkg,
-                    icon = ri.loadIcon(pm)
-                )
-            }.sortedBy { it.label.lowercase() }
+                val resolveInfos = pm.queryIntentActivities(mainIntent, 0)
+                resolveInfos.mapNotNull { ri ->
+                    val pkg = ri.activityInfo.packageName
+                    if (pkg == "com.google.android.GoogleCameraEng") return@mapNotNull null
+                    
+                    AppInfo(
+                        label = ri.loadLabel(pm).toString(),
+                        packageName = pkg,
+                        icon = ri.loadIcon(pm)
+                    )
+                }.sortedBy { it.label.lowercase() }
+            }
             
             withContext(Dispatchers.Main) {
                 _apps.value = appList
@@ -119,17 +170,70 @@ class AppsViewModel : ViewModel() {
     }
 }
 
+enum class MenuSection {
+    HOME_SHORTCUTS,
+    HARDWARE_GESTURES,
+    TILES_NOTIFICATION,
+    SYSTEM_SETTINGS
+}
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScreen(
     viewModel: AppsViewModel = viewModel()
 ) {
     val context = LocalContext.current
-    val apps by viewModel.apps.collectAsState()
-    val isLoading by viewModel.isLoading.collectAsState()
+    val apps by viewModel.apps.collectAsStateWithLifecycle()
+    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val showSystemApps by viewModel.showSystemApps.collectAsStateWithLifecycle()
     var searchQuery by remember { mutableStateOf("") }
     var isNotificationEnabled by remember {
         mutableStateOf(NotificationHelper.isNotificationEnabled(context))
+    }
+    var isDevModeEnabled by remember {
+        mutableStateOf(NotificationHelper.isDevModeEnabled(context))
+    }
+    var notificationTitle by remember {
+        mutableStateOf(NotificationHelper.getNotificationTitle(context))
+    }
+    var notificationIconType by remember {
+        mutableStateOf(NotificationHelper.getNotificationIconType(context))
+    }
+    var notificationPresetIcon by remember {
+        mutableStateOf(NotificationHelper.getNotificationPresetIcon(context))
+    }
+    var customIconPath by remember {
+        mutableStateOf(NotificationHelper.getNotificationCustomIconPath(context))
+    }
+    var notificationBitmap by remember(customIconPath, notificationIconType) {
+        mutableStateOf<android.graphics.Bitmap?>(null)
+    }
+    LaunchedEffect(customIconPath, notificationIconType) {
+        if (notificationIconType == "custom" && customIconPath != null) {
+            val loadedBitmap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val file = java.io.File(customIconPath!!)
+                    if (file.exists()) {
+                        android.graphics.BitmapFactory.decodeFile(file.absolutePath)
+                    } else null
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            notificationBitmap = loadedBitmap
+        } else {
+            notificationBitmap = null
+        }
+    }
+    var selectedImageUriForConversion by remember { mutableStateOf<android.net.Uri?>(null) }
+    var activeTileIdForImageConversion by remember { mutableStateOf<Int?>(null) }
+    
+    val galleryLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            selectedImageUriForConversion = uri
+        }
     }
 
     // Reactive states for currently selected target packages
@@ -142,18 +246,137 @@ fun MainScreen(
     var cameraTargetPkg by remember {
         mutableStateOf(NotificationHelper.getTargetPackage(context, TriggerType.CAMERA))
     }
+    val tileTargetPkgs = remember {
+        androidx.compose.runtime.mutableStateMapOf<Int, String?>().apply {
+            for (i in 1..15) {
+                val type = NotificationHelper.getTileTriggerType(i)!!
+                put(i, NotificationHelper.getTargetPackage(context, type))
+            }
+        }
+    }
+    val tileAddedStates = remember {
+        androidx.compose.runtime.mutableStateMapOf<Int, Boolean>().apply {
+            for (i in 1..15) {
+                put(i, NotificationHelper.isTileAdded(context, i))
+            }
+        }
+    }
+    var showAddTileDialog by remember { mutableStateOf(false) }
+    var shortcutTargetPkg by remember {
+        mutableStateOf(NotificationHelper.getTargetPackage(context, TriggerType.SHORTCUT))
+    }
+
+    var refreshCounter by remember { mutableStateOf(0) }
+    var isSelectingForSequence by remember { mutableStateOf(false) }
 
     // Track active selection
     var selectingForTrigger by remember { mutableStateOf<TriggerType?>(null) }
     var isSelectingForShortcut by remember { mutableStateOf(false) }
+    var showShortcutTypeSelector by remember { mutableStateOf(false) }
+    var activeSequenceIdForDesign by remember { mutableStateOf<String?>(null) }
+    var selectedMenuSection by remember { mutableStateOf<MenuSection?>(null) }
 
     // State for launching the shortcut designer
     var designerTargetApp by remember { mutableStateOf<AppInfo?>(null) }
     var designerTargetActivity by remember { mutableStateOf<android.content.pm.ActivityInfo?>(null) }
 
+    // States for custom Intents / system requests
+    var isCreatingIntent by remember { mutableStateOf(false) }
+    var designerTargetIntentUri by remember { mutableStateOf<String?>(null) }
+    var designerTargetIntentLabel by remember { mutableStateOf<String?>(null) }
+    var savedIntentsList by remember { mutableStateOf(NotificationHelper.getSavedIntents(context)) }
+
+    var hasWriteSettingsPermission by remember {
+        mutableStateOf(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                Settings.System.canWrite(context)
+            } else {
+                true
+            }
+        )
+    }
+    val tileIntents = remember {
+        androidx.compose.runtime.mutableStateMapOf<Int, Intent?>().apply {
+            for (i in 1..15) {
+                put(i, NotificationHelper.getTileIntent(context, i))
+            }
+        }
+    }
+    var isSelectingForTileId by remember { mutableStateOf<Int?>(null) }
+    var devEditTriggerTargetUri by remember { mutableStateOf<String?>(null) }
+    var devEditTriggerTargetType by remember { mutableStateOf<TriggerType?>(null) }
+    var devEditTriggerIsSequence by remember { mutableStateOf(false) }
+
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    DisposableEffect(lifecycleOwner, refreshCounter) {
+        val observer = androidx.lifecycle.LifecycleEventObserver { _, event ->
+            if (event == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                hasWriteSettingsPermission = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    Settings.System.canWrite(context)
+                } else {
+                    true
+                }
+                for (i in 1..15) {
+                    val type = NotificationHelper.getTileTriggerType(i)!!
+                    tileIntents[i] = NotificationHelper.getTileIntent(context, i)
+                    tileTargetPkgs[i] = NotificationHelper.getTargetPackage(context, type)
+                    tileAddedStates[i] = NotificationHelper.isTileAdded(context, i)
+                }
+                homeTargetPkg = NotificationHelper.getTargetPackage(context, TriggerType.HOME)
+                assistTargetPkg = NotificationHelper.getTargetPackage(context, TriggerType.ASSIST)
+                cameraTargetPkg = NotificationHelper.getTargetPackage(context, TriggerType.CAMERA)
+                shortcutTargetPkg = NotificationHelper.getTargetPackage(context, TriggerType.SHORTCUT)
+                savedIntentsList = NotificationHelper.getSavedIntents(context)
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+        }
+    }
+
+    LaunchedEffect(refreshCounter) {
+        for (i in 1..15) {
+            val type = NotificationHelper.getTileTriggerType(i)!!
+            tileIntents[i] = NotificationHelper.getTileIntent(context, i)
+            tileTargetPkgs[i] = NotificationHelper.getTargetPackage(context, type)
+            tileAddedStates[i] = NotificationHelper.isTileAdded(context, i)
+        }
+        homeTargetPkg = NotificationHelper.getTargetPackage(context, TriggerType.HOME)
+        assistTargetPkg = NotificationHelper.getTargetPackage(context, TriggerType.ASSIST)
+        cameraTargetPkg = NotificationHelper.getTargetPackage(context, TriggerType.CAMERA)
+        shortcutTargetPkg = NotificationHelper.getTargetPackage(context, TriggerType.SHORTCUT)
+    }
+
+    BackHandler(enabled = selectedMenuSection != null) {
+        selectedMenuSection = null
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { _ -> }
+
+    val saveTriggerTarget: (String, TriggerType, Boolean) -> Unit = { target, targetTrigger, isSeq ->
+        if (isSeq) {
+            NotificationHelper.addSequenceTarget(context, targetTrigger, target)
+            refreshCounter++
+        } else {
+            NotificationHelper.saveTargetPackage(context, targetTrigger, target)
+            when (targetTrigger) {
+                TriggerType.HOME -> homeTargetPkg = target
+                TriggerType.ASSIST -> assistTargetPkg = target
+                TriggerType.CAMERA -> cameraTargetPkg = target
+                TriggerType.SHORTCUT -> shortcutTargetPkg = target
+                else -> {
+                    val tileId = targetTrigger.name.removePrefix("TILE").toIntOrNull()
+                    if (tileId != null) {
+                        tileTargetPkgs[tileId] = target
+                    }
+                }
+            }
+        }
+        android.widget.Toast.makeText(context, "ההגדרה נשמרה בהצלחה!", android.widget.Toast.LENGTH_SHORT).show()
+    }
 
     LaunchedEffect(Unit) {
         viewModel.loadApps(context.packageManager)
@@ -171,6 +394,10 @@ fun MainScreen(
             trigger == TriggerType.HOME -> "בחירת אפליקציה למסך הבית"
             trigger == TriggerType.ASSIST -> "בחירת אפליקציה לסייען הקולי"
             trigger == TriggerType.CAMERA -> "בחירת אפליקציה למצלמה"
+            trigger == TriggerType.TILE1 -> "בחירת אפליקציה לאריח מהיר 1"
+            trigger == TriggerType.TILE2 -> "בחירת אפליקציה לאריח מהיר 2"
+            trigger == TriggerType.TILE3 -> "בחירת אפליקציה לאריח מהיר 3"
+            trigger == TriggerType.SHORTCUT -> "בחירת אפליקציה לסבב פעולות"
             else -> ""
         }
 
@@ -287,20 +514,19 @@ fun MainScreen(
                                 if (!isSelectingForShortcut && trigger != null) {
                                     Button(
                                         onClick = {
-                                            NotificationHelper.saveTargetPackage(context, trigger, app.packageName)
-                                            when (trigger) {
-                                                TriggerType.HOME -> homeTargetPkg = app.packageName
-                                                TriggerType.ASSIST -> assistTargetPkg = app.packageName
-                                                TriggerType.CAMERA -> cameraTargetPkg = app.packageName
+                                            val defaultIntent = context.packageManager.getLaunchIntentForPackage(app.packageName)
+                                            val defaultUri = defaultIntent?.toUri(Intent.URI_INTENT_SCHEME) ?: "intent:#Intent;package=${app.packageName};end"
+                                            if (isDevModeEnabled) {
+                                                devEditTriggerTargetUri = defaultUri
+                                                devEditTriggerTargetType = trigger
+                                                devEditTriggerIsSequence = isSelectingForSequence
+                                            } else {
+                                                saveTriggerTarget(app.packageName, trigger, isSelectingForSequence)
                                             }
                                             selectedAppForActivities = null
                                             selectingForTrigger = null
+                                            isSelectingForSequence = false
                                             searchQuery = ""
-                                            android.widget.Toast.makeText(
-                                                context, 
-                                                "ההגדרה נשמרה בהצלחה!", 
-                                                android.widget.Toast.LENGTH_SHORT
-                                            ).show()
                                         }
                                     ) {
                                         Text("בחר")
@@ -356,20 +582,21 @@ fun MainScreen(
                                                 designerTargetActivity = activity
                                             } else if (trigger != null) {
                                                 val fullTarget = "${app.packageName}/${activity.name}"
-                                                NotificationHelper.saveTargetPackage(context, trigger, fullTarget)
-                                                when (trigger) {
-                                                    TriggerType.HOME -> homeTargetPkg = fullTarget
-                                                    TriggerType.ASSIST -> assistTargetPkg = fullTarget
-                                                    TriggerType.CAMERA -> cameraTargetPkg = fullTarget
+                                                if (isDevModeEnabled) {
+                                                    val customIntent = Intent(Intent.ACTION_MAIN).apply {
+                                                        setClassName(app.packageName, activity.name)
+                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    }
+                                                    devEditTriggerTargetUri = customIntent.toUri(Intent.URI_INTENT_SCHEME)
+                                                    devEditTriggerTargetType = trigger
+                                                    devEditTriggerIsSequence = isSelectingForSequence
+                                                } else {
+                                                    saveTriggerTarget(fullTarget, trigger, isSelectingForSequence)
                                                 }
                                                 selectedAppForActivities = null
                                                 selectingForTrigger = null
+                                                isSelectingForSequence = false
                                                 searchQuery = ""
-                                                android.widget.Toast.makeText(
-                                                    context, 
-                                                    "תת-האקטיביטי נשמר בהצלחה!", 
-                                                    android.widget.Toast.LENGTH_SHORT
-                                                ).show()
                                             }
                                         }
                                         .padding(horizontal = 16.dp, vertical = 12.dp),
@@ -464,33 +691,204 @@ fun MainScreen(
                     )
                 }
             ) { padding ->
+                var selectedTab by remember { mutableStateOf(0) }
                 Column(modifier = Modifier.padding(padding).fillMaxSize()) {
-                    OutlinedTextField(
-                        value = searchQuery,
-                        onValueChange = { searchQuery = it },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        placeholder = { Text("חיפוש אפליקציות...") },
-                        leadingIcon = { Icon(Icons.Default.Search, contentDescription = "חיפוש") },
-                        singleLine = true
-                    )
+                    TabRow(selectedTabIndex = selectedTab) {
+                        Tab(
+                            selected = selectedTab == 0,
+                            onClick = { selectedTab = 0 },
+                            text = { Text("אפליקציות") }
+                        )
+                        Tab(
+                            selected = selectedTab == 1,
+                            onClick = { selectedTab = 1 },
+                            text = { Text("בקשות מערכת (Intents)") }
+                        )
+                    }
 
-                    if (isLoading) {
-                        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                            CircularProgressIndicator()
+                    if (selectedTab == 0) {
+                        OutlinedTextField(
+                            value = searchQuery,
+                            onValueChange = { searchQuery = it },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 8.dp),
+                            placeholder = { Text("חיפוש אפליקציות...") },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "חיפוש") },
+                            singleLine = true
+                        )
+
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.secondary,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text(
+                                    text = "הצג אפליקציות מערכת וחבילות מוסתרות",
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            Switch(
+                                checked = showSystemApps,
+                                onCheckedChange = { isChecked ->
+                                    viewModel.setShowSystemApps(context.packageManager, isChecked)
+                                }
+                            )
+                        }
+
+                        if (isLoading) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                CircularProgressIndicator()
+                            }
+                        } else {
+                            val filteredApps = remember(searchQuery, apps) {
+                                apps.filter { 
+                                    it.label.contains(searchQuery, ignoreCase = true) || 
+                                    it.packageName.contains(searchQuery, ignoreCase = true)
+                                }
+                            }
+
+                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                items(filteredApps, key = { it.packageName }) { app ->
+                                    AppListItem(app = app, onClick = {
+                                        selectedAppForActivities = app
+                                    })
+                                }
+                            }
                         }
                     } else {
-                        val filteredApps = apps.filter { 
-                            it.label.contains(searchQuery, ignoreCase = true) || 
-                            it.packageName.contains(searchQuery, ignoreCase = true)
-                        }
+                        Column(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(16.dp)
+                        ) {
+                            Button(
+                                onClick = { isCreatingIntent = true },
+                                modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
+                                colors = ButtonDefaults.buttonColors(
+                                    containerColor = MaterialTheme.colorScheme.secondary
+                                )
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null)
+                                Spacer(modifier = Modifier.width(8.dp))
+                                Text("צור בקשת מערכת (Intent) חדשה")
+                            }
 
-                        LazyColumn(modifier = Modifier.fillMaxSize()) {
-                            items(filteredApps, key = { it.packageName }) { app ->
-                                AppListItem(app = app, onClick = {
-                                    selectedAppForActivities = app
-                                })
+                            if (savedIntentsList.isEmpty()) {
+                                Box(
+                                    modifier = Modifier.weight(1f).fillMaxWidth(),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        "אין בקשות מערכת שמורות. צור אחת חדשה כדי לבחור אותה.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            } else {
+                                LazyColumn(modifier = Modifier.weight(1f)) {
+                                    items(savedIntentsList) { intent ->
+                                        val intentUri = intent.toUri(Intent.URI_INTENT_SCHEME)
+                                        val label = intent.getStringExtra("PINAPP_INTENT_LABEL") ?: "בקשת מערכת"
+                                        val action = intent.action ?: "ללא Action"
+                                        val data = intent.dataString ?: "ללא Data"
+
+                                        Card(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(vertical = 4.dp),
+                                            colors = CardDefaults.cardColors(
+                                                containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                            )
+                                        ) {
+                                            Column(modifier = Modifier.padding(12.dp)) {
+                                                Row(
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    modifier = Modifier.fillMaxWidth()
+                                                ) {
+                                                    Icon(
+                                                        imageVector = Icons.Default.Send,
+                                                        contentDescription = null,
+                                                        tint = MaterialTheme.colorScheme.secondary,
+                                                        modifier = Modifier.size(20.dp)
+                                                    )
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Text(
+                                                        text = label,
+                                                        style = MaterialTheme.typography.titleMedium,
+                                                        modifier = Modifier.weight(1f)
+                                                    )
+                                                }
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text("Action: $action", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                if (data != "ללא Data") {
+                                                    Text("Data: $data", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                                }
+                                                Spacer(modifier = Modifier.height(12.dp))
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    horizontalArrangement = Arrangement.End
+                                                ) {
+                                                    IconButton(
+                                                        onClick = {
+                                                            try {
+                                                                val testIntent = Intent.parseUri(intentUri, Intent.URI_INTENT_SCHEME).apply {
+                                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                                }
+                                                                context.startActivity(testIntent)
+                                                            } catch (e: Exception) {
+                                                                android.widget.Toast.makeText(context, "שגיאה בהפעלה: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                                                            }
+                                                        }
+                                                    ) {
+                                                        Icon(Icons.Default.PlayArrow, contentDescription = "בדיקה", tint = MaterialTheme.colorScheme.primary)
+                                                    }
+                                                    IconButton(
+                                                        onClick = {
+                                                            NotificationHelper.deleteIntent(context, intentUri)
+                                                            savedIntentsList = NotificationHelper.getSavedIntents(context)
+                                                        }
+                                                    ) {
+                                                        Icon(Icons.Default.Delete, contentDescription = "מחיקה", tint = MaterialTheme.colorScheme.error)
+                                                    }
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    Button(
+                                                        onClick = {
+                                                            if (isSelectingForShortcut) {
+                                                                designerTargetIntentUri = intentUri
+                                                                designerTargetIntentLabel = label
+                                                            } else if (trigger != null) {
+                                                                if (isDevModeEnabled) {
+                                                                    devEditTriggerTargetUri = intentUri
+                                                                    devEditTriggerTargetType = trigger
+                                                                    devEditTriggerIsSequence = isSelectingForSequence
+                                                                } else {
+                                                                    saveTriggerTarget(intentUri, trigger, isSelectingForSequence)
+                                                                }
+                                                            }
+                                                            selectingForTrigger = null
+                                                            isSelectingForShortcut = false
+                                                            isSelectingForSequence = false
+                                                        }
+                                                    ) {
+                                                        Text("בחר")
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -498,224 +896,933 @@ fun MainScreen(
             }
         }
     } else {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text("PINAPP - הגדרות קיצורי דרך") }
-                )
-            }
-        ) { padding ->
-            Column(
-                modifier = Modifier
-                    .padding(padding)
-                    .fillMaxSize()
-                    .verticalScroll(rememberScrollState())
-            ) {
-                Text(
-                    text = "הגדר אילו אפליקציות ייפתחו אוטומטית בכל פעם שתפעיל את קיצורי הדרך השונים של המכשיר שלך.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(16.dp),
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-
-                // 1. HOME SCREEN CARD
-                TriggerConfigCard(
-                    title = "לחיצה על כפתור הבית",
-                    description = "הגדר איזו אפליקציה תיפתח בכל פעם שתלחץ על כפתור הבית במכשיר.",
-                    targetPkg = homeTargetPkg,
-                    icon = Icons.Default.Home,
-                    onSelectClick = { selectingForTrigger = TriggerType.HOME },
-                    onClearClick = {
-                        NotificationHelper.clearTargetPackage(context, TriggerType.HOME)
-                        homeTargetPkg = null
-                    }
-                )
-
-                // 2. ASSISTANT CARD
-                TriggerConfigCard(
-                    title = "הפעלת הסייען הקולי (Assist)",
-                    description = "הגדר איזו אפליקציה תיפתח בעת הפעלת הסייען (לחיצה ארוכה על כפתור הבית, מחווה, או כפתור ייעודי).",
-                    targetPkg = assistTargetPkg,
-                    icon = Icons.Default.Star,
-                    onSelectClick = { selectingForTrigger = TriggerType.ASSIST },
-                    onClearClick = {
-                        NotificationHelper.clearTargetPackage(context, TriggerType.ASSIST)
-                        assistTargetPkg = null
-                    }
-                )
-
-                // 3. CAMERA CARD
-                TriggerConfigCard(
-                    title = "קיצור דרך למצלמה (לחיצה כפולה)",
-                    description = "הגדר איזו אפליקציה תיפתח בעת הפעלת קיצור הדרך למצלמה של המכשיר (למשל לחיצה כפולה על מקש ההפעלה).",
-                    targetPkg = cameraTargetPkg,
-                    icon = Icons.Default.Settings,
-                    onSelectClick = { selectingForTrigger = TriggerType.CAMERA },
-                    onClearClick = {
-                        NotificationHelper.clearTargetPackage(context, TriggerType.CAMERA)
-                        cameraTargetPkg = null
-                    }
-                )
-
-                // 4. CUSTOM SHORTCUTS CARD
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.35f)
+        if (selectedMenuSection == null) {
+            Scaffold(
+                topBar = {
+                    TopAppBar(
+                        title = {
+                            Text(
+                                text = "PINAPP - תפריט ראשי",
+                                fontWeight = FontWeight.Bold,
+                                modifier = Modifier.fillMaxWidth(),
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Right
+                            )
+                        }
                     )
-                ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
-                    ) {
-                        Row(
-                            verticalAlignment = Alignment.CenterVertically,
-                            modifier = Modifier.fillMaxWidth()
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Star,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.tertiary,
-                                modifier = Modifier.size(24.dp)
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = "יצירת אייקונים וקיצורי דרך למסך הבית",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = MaterialTheme.colorScheme.onTertiaryContainer
-                            )
-                        }
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = "צור אייקונים מעוצבים משלך (כולל אימוג'י וצבעים מותאמים אישית) והוסף אותם למסך הבית להפעלת אפליקציות או תת-אקטיביטיז פנימיים במהירות.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        Button(
-                            onClick = { isSelectingForShortcut = true },
-                            modifier = Modifier.align(Alignment.End),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.tertiary
-                            )
-                        ) {
-                            Text("צור קיצור דרך מעוצב")
-                        }
-                    }
                 }
-
-                Spacer(modifier = Modifier.height(16.dp))
-
-                // SYSTEM DEFAULT SETTINGS GUIDE
-                Card(
+            ) { padding ->
+                Column(
                     modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.secondaryContainer
-                    )
+                        .padding(padding)
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(16.dp)
                 ) {
-                    Column(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp)
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.4f)
+                        ),
+                        shape = RoundedCornerShape(16.dp)
                     ) {
-                        Text(
-                            text = "הגדרת ברירת מחדל במערכת",
-                            style = MaterialTheme.typography.titleMedium,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Text(
-                            text = "כדי שהקיצורים הללו יפעלו, עליך להגדיר את PINAPP כאפליקציית ברירת המחדל המתאימה במערכת.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
-                        )
-                        Spacer(modifier = Modifier.height(12.dp))
-                        
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(16.dp)
                         ) {
-                            Button(
-                                onClick = {
-                                    openSettingsSafely(context, Settings.ACTION_HOME_SETTINGS)
-                                },
-                                modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.secondaryContainer
-                                )
-                            ) {
-                                Text("הגדרת מסך בית", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-
-                            Button(
-                                onClick = {
-                                    openSettingsSafely(context, Settings.ACTION_VOICE_INPUT_SETTINGS)
-                                },
-                                modifier = Modifier.weight(1f),
-                                colors = ButtonDefaults.buttonColors(
-                                    containerColor = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    contentColor = MaterialTheme.colorScheme.secondaryContainer
-                                )
-                            ) {
-                                Text("הגדרת סייען", maxLines = 1, overflow = TextOverflow.Ellipsis)
-                            }
-                        }
-
-                        OutlinedButton(
-                            onClick = {
-                                openSettingsSafely(context, Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
-                            },
-                            modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
-                            colors = ButtonDefaults.outlinedButtonColors(
-                                contentColor = MaterialTheme.colorScheme.onSecondaryContainer
-                            )
-                        ) {
-                            Text("פתיחת הגדרות ברירת מחדל מלאות")
-                        }
-                    }
-                }
-
-                // Notification toggle
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp)
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(16.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "הצגת התראה קבועה",
-                                style = MaterialTheme.typography.titleMedium
+                                text = "ברוכים הבאים ל-PINAPP 🚀",
+                                style = MaterialTheme.typography.titleLarge,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
                             )
-                            Spacer(modifier = Modifier.height(4.dp))
+                            Spacer(modifier = Modifier.height(6.dp))
                             Text(
-                                text = "מאפשרת לגשת להגדרות אלו במהירות מלוח ההתראות בכל עת",
+                                text = "התאם אישית מחוות פיזיות, אריחי הגדרות מהירות וקיצורי דרך למסך הבית להפעלת כל אפליקציה או פקודה במהירות שיא.",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Switch(
-                            checked = isNotificationEnabled,
-                            onCheckedChange = { checked ->
-                                NotificationHelper.setNotificationEnabled(context, checked)
-                                isNotificationEnabled = checked
+                    }
+
+                    Text(
+                        text = "בחר קטגוריה להגדרה:",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+
+                    MenuCard(
+                        title = "אייקונים וקיצורי דרך למסך הבית",
+                        description = "יצירת קיצורי דרך מותאמים אישית (כולל אימוג'י וצבעים) וסבבי פעולות מהירים ישירות ממסך הבית.",
+                        icon = Icons.Default.Home,
+                        badgeText = if (shortcutTargetPkg != null) "סבב פעולות: פעיל" else "סבב פעולות: לא מוגדר",
+                        badgeColor = if (shortcutTargetPkg != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                        onClick = { selectedMenuSection = MenuSection.HOME_SHORTCUTS }
+                    )
+
+                    val definedGesturesCount = listOfNotNull(homeTargetPkg, assistTargetPkg, cameraTargetPkg).size
+                    MenuCard(
+                        title = "מחוות ולחיצות על מקשי המכשיר",
+                        description = "התאמת פקודות ואפליקציות ללחיצה על כפתור הבית, הסייען הקולי או מקש המצלמה הפיזי.",
+                        icon = Icons.Default.Settings,
+                        badgeText = "מוגדרים: $definedGesturesCount / 3",
+                        badgeColor = if (definedGesturesCount > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                        onClick = { selectedMenuSection = MenuSection.HARDWARE_GESTURES }
+                    )
+
+                    val activeTilesCount = tileAddedStates.values.count { it }
+                    MenuCard(
+                        title = "אריחים ולוח ההתראות העליון",
+                        description = "ניהול התראה קבועה בלוח העליון והגדרת עד 15 אריחי גישה מהירה מותאמים אישית.",
+                        icon = Icons.Default.Notifications,
+                        badgeText = "התראה: ${if (isNotificationEnabled) "פעילה" else "כבויה"} | אריחים: $activeTilesCount פעילים",
+                        badgeColor = if (isNotificationEnabled || activeTilesCount > 0) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.secondary,
+                        onClick = { selectedMenuSection = MenuSection.TILES_NOTIFICATION }
+                    )
+
+                    val permissionStatusText = if (hasWriteSettingsPermission) "הרשאה מאושרת" else "נדרשת הרשאת כתיבה"
+                    MenuCard(
+                        title = "הגדרות והרשאות מערכת",
+                        description = "ניהול פקודות מערכת מותאמות (Intents), הרשאות מערכת והגדרות ברירת מחדל.",
+                        icon = Icons.Default.Lock,
+                        badgeText = "$permissionStatusText | פקודות: ${savedIntentsList.size}",
+                        badgeColor = if (hasWriteSettingsPermission) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        onClick = { selectedMenuSection = MenuSection.SYSTEM_SETTINGS }
+                    )
+
+                    Spacer(modifier = Modifier.height(24.dp))
+                }
+            }
+        } else {
+            when (selectedMenuSection) {
+                MenuSection.HOME_SHORTCUTS -> {
+                    Scaffold(
+                        topBar = {
+                            TopAppBar(
+                                title = { Text("אייקונים וקיצורי דרך למסך הבית") },
+                                navigationIcon = {
+                                    IconButton(onClick = { selectedMenuSection = null }) {
+                                        Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "חזרה")
+                                    }
+                                }
+                            )
+                        }
+                    ) { padding ->
+                        Column(
+                            modifier = Modifier
+                                .padding(padding)
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = "הגדר אילו אפליקציות ייפתחו אוטומטית בכל פעם שתפעיל את קיצורי הדרך השונים של המכשיר שלך.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(16.dp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            CategoryHeader(title = "אייקונים וקיצורי דרך למסך הבית", icon = Icons.Default.Home)
+
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.35f)
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Star,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.tertiary,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "יצירת אייקונים וקיצורי דרך למסך הבית",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onTertiaryContainer
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = "צור אייקונים מעוצבים משלך (כולל אימוג'י וצבעים מותאמים אישית) והוסף אותם למסך הבית להפעלת אפליקציות או תת-אקטיביטיז פנימיים במהירות.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onTertiaryContainer.copy(alpha = 0.85f)
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End)
+                                    ) {
+                                        Button(
+                                            onClick = { showShortcutTypeSelector = true },
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = MaterialTheme.colorScheme.primary
+                                            ),
+                                            modifier = Modifier.fillMaxWidth()
+                                        ) {
+                                            Icon(Icons.Default.Star, contentDescription = null)
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text("צור קיצור דרך מעוצב")
+                                        }
+                                    }
+                                }
                             }
-                        )
+
+                            TriggerConfigCard(
+                                title = "הגדרת סבב פעולות לאייקונים (קיצורי דרך)",
+                                description = "הגדר את רשימת הפעולות שיופעלו במחזוריות (אחת אחרי השנייה) בכל פעם שתלחץ על הקיצור המעוצב שייצרת באמצעות כפתור 'אייקון לסבב פעולות' שלמעלה.",
+                                type = TriggerType.SHORTCUT,
+                                icon = Icons.Default.Refresh,
+                                targetPkg = shortcutTargetPkg,
+                                onSelectClick = { 
+                                    isSelectingForSequence = NotificationHelper.isSequenceEnabled(context, TriggerType.SHORTCUT)
+                                    selectingForTrigger = TriggerType.SHORTCUT 
+                                },
+                                onClearClick = {
+                                    NotificationHelper.clearTargetPackage(context, TriggerType.SHORTCUT)
+                                    shortcutTargetPkg = null
+                                },
+                                refreshCounter = refreshCounter,
+                                onRefreshRequest = { refreshCounter++ }
+                            )
+
+                            Spacer(modifier = Modifier.height(32.dp))
+                        }
                     }
                 }
+                MenuSection.HARDWARE_GESTURES -> {
+                    Scaffold(
+                        topBar = {
+                            TopAppBar(
+                                title = { Text("מחוות ולחיצות על מקשי המכשיר") },
+                                navigationIcon = {
+                                    IconButton(onClick = { selectedMenuSection = null }) {
+                                        Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "חזרה")
+                                    }
+                                }
+                            )
+                        }
+                    ) { padding ->
+                        Column(
+                            modifier = Modifier
+                                .padding(padding)
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = "הגדר אילו אפליקציות ייפתחו אוטומטית בכל פעם שתפעיל את קיצורי הדרך השונים של המכשיר שלך.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(16.dp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
 
-                Spacer(modifier = Modifier.height(32.dp))
+                            CategoryHeader(title = "מחוות ולחיצות על מקשי המכשיר", icon = Icons.Default.Settings)
+
+                            TriggerConfigCard(
+                                title = "לחיצה על כפתור הבית",
+                                description = "הגדר איזו אפליקציה תיפתח בכל פעם שתלחץ על כפתור הבית במכשיר.",
+                                type = TriggerType.HOME,
+                                icon = Icons.Default.Home,
+                                targetPkg = homeTargetPkg,
+                                onSelectClick = { 
+                                    isSelectingForSequence = NotificationHelper.isSequenceEnabled(context, TriggerType.HOME)
+                                    selectingForTrigger = TriggerType.HOME 
+                                },
+                                onClearClick = {
+                                    NotificationHelper.clearTargetPackage(context, TriggerType.HOME)
+                                    homeTargetPkg = null
+                                },
+                                refreshCounter = refreshCounter,
+                                onRefreshRequest = { refreshCounter++ }
+                            )
+
+                            TriggerConfigCard(
+                                title = "הפעלת הסייען הקולי (Assist)",
+                                description = "הגדר איזו אפליקציה תיפתח בעת הפעלת הסייען (לחיצה ארוכה על כפתור הבית, מחווה, או כפתור ייעודי).",
+                                type = TriggerType.ASSIST,
+                                icon = Icons.Default.Star,
+                                targetPkg = assistTargetPkg,
+                                onSelectClick = { 
+                                    isSelectingForSequence = NotificationHelper.isSequenceEnabled(context, TriggerType.ASSIST)
+                                    selectingForTrigger = TriggerType.ASSIST 
+                                },
+                                onClearClick = {
+                                    NotificationHelper.clearTargetPackage(context, TriggerType.ASSIST)
+                                    assistTargetPkg = null
+                                },
+                                refreshCounter = refreshCounter,
+                                onRefreshRequest = { refreshCounter++ }
+                            )
+
+                            TriggerConfigCard(
+                                title = "קיצור דרך למצלמה (לחיצה כפולה)",
+                                description = "הגדר איזו אפליקציה תיפתח בעת הפעלת קיצור הדרך למצלמה של המכשיר (למשל לחיצה כפולה על מקש ההפעלה).",
+                                type = TriggerType.CAMERA,
+                                icon = Icons.Default.Settings,
+                                targetPkg = cameraTargetPkg,
+                                onSelectClick = { 
+                                    isSelectingForSequence = NotificationHelper.isSequenceEnabled(context, TriggerType.CAMERA)
+                                    selectingForTrigger = TriggerType.CAMERA 
+                                },
+                                onClearClick = {
+                                    NotificationHelper.clearTargetPackage(context, TriggerType.CAMERA)
+                                    cameraTargetPkg = null
+                                },
+                                refreshCounter = refreshCounter,
+                                onRefreshRequest = { refreshCounter++ }
+                            )
+
+                            Spacer(modifier = Modifier.height(32.dp))
+                        }
+                    }
+                }
+                MenuSection.TILES_NOTIFICATION -> {
+                    Scaffold(
+                        topBar = {
+                            TopAppBar(
+                                title = { Text("אריחים ולוח ההתראות העליון") },
+                                navigationIcon = {
+                                    IconButton(onClick = { selectedMenuSection = null }) {
+                                        Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "חזרה")
+                                    }
+                                }
+                            )
+                        }
+                    ) { padding ->
+                        Column(
+                            modifier = Modifier
+                                .padding(padding)
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = "הגדר אילו אפליקציות ייפתחו אוטומטית בכל פעם שתפעיל את קיצורי הדרך השונים של המכשיר שלך.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(16.dp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            CategoryHeader(title = "אריחים ולוח ההתראות העליון", icon = Icons.Default.Notifications)
+
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp)
+                            ) {
+                                Column(modifier = Modifier.fillMaxWidth()) {
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(
+                                                text = "הצגת התראה קבועה",
+                                                style = MaterialTheme.typography.titleMedium
+                                            )
+                                            Spacer(modifier = Modifier.height(4.dp))
+                                            Text(
+                                                text = "מאפשרת לגשת להגדרות אלו במהירות מלוח ההתראות בכל עת",
+                                                style = MaterialTheme.typography.bodyMedium,
+                                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                            )
+                                        }
+                                        Switch(
+                                            checked = isNotificationEnabled,
+                                            onCheckedChange = { checked ->
+                                                NotificationHelper.setNotificationEnabled(context, checked)
+                                                isNotificationEnabled = checked
+                                            }
+                                        )
+                                    }
+
+                                    androidx.compose.animation.AnimatedVisibility(
+                                        visible = isNotificationEnabled
+                                    ) {
+                                        Column(
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                                        ) {
+                                            Box(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .height(1.dp)
+                                                    .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+                                            )
+
+                                            Text(
+                                                text = "עריכת מראה ההתראה",
+                                                style = MaterialTheme.typography.titleSmall,
+                                                fontWeight = FontWeight.Bold,
+                                                color = MaterialTheme.colorScheme.primary
+                                            )
+
+                                            OutlinedTextField(
+                                                value = notificationTitle,
+                                                onValueChange = { notificationTitle = it },
+                                                label = { Text("כותרת ההתראה (שם)") },
+                                                modifier = Modifier.fillMaxWidth(),
+                                                singleLine = true,
+                                                trailingIcon = {
+                                                    IconButton(
+                                                        onClick = {
+                                                            NotificationHelper.setNotificationTitle(context, notificationTitle)
+                                                            Toast.makeText(context, "שם ההתראה עודכן!", Toast.LENGTH_SHORT).show()
+                                                        }
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Default.Check,
+                                                            contentDescription = "שמור כותרת",
+                                                            tint = MaterialTheme.colorScheme.primary
+                                                        )
+                                                    }
+                                                }
+                                            )
+
+                                            Column(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Text(
+                                                    text = "בחירת סמל (אייקון)",
+                                                    style = MaterialTheme.typography.titleSmall,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                                Text(
+                                                    text = "סמלים מובנים מראש:",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+
+                                            val presets = listOf(
+                                                Pair(android.R.drawable.ic_menu_revert, "חץ"),
+                                                Pair(android.R.drawable.ic_menu_compass, "מצפן"),
+                                                Pair(android.R.drawable.ic_menu_mylocation, "מיקום"),
+                                                Pair(android.R.drawable.ic_menu_directions, "ניווט"),
+                                                Pair(android.R.drawable.ic_menu_camera, "מצלמה"),
+                                                Pair(android.R.drawable.ic_menu_manage, "הגדרות"),
+                                                Pair(android.R.drawable.ic_menu_view, "עין"),
+                                                Pair(android.R.drawable.ic_dialog_info, "מידע"),
+                                                Pair(android.R.drawable.star_on, "כוכב"),
+                                                Pair(android.R.drawable.ic_menu_send, "שליחה")
+                                            )
+
+                                            LazyRow(
+                                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                                modifier = Modifier.fillMaxWidth()
+                                            ) {
+                                                items(presets) { (resId, label) ->
+                                                    val isSelected = notificationIconType == "preset" && notificationPresetIcon == resId
+                                                    val iconDrawable = try {
+                                                        androidx.core.content.ContextCompat.getDrawable(context, resId)
+                                                    } catch (e: Exception) {
+                                                        null
+                                                    }
+
+                                                    Column(
+                                                        horizontalAlignment = Alignment.CenterHorizontally,
+                                                        modifier = Modifier
+                                                            .clip(RoundedCornerShape(8.dp))
+                                                            .background(
+                                                                if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                                                                else Color.Transparent
+                                                            )
+                                                            .border(
+                                                                width = 1.dp,
+                                                                color = if (isSelected) MaterialTheme.colorScheme.primary
+                                                                else MaterialTheme.colorScheme.outlineVariant,
+                                                                shape = RoundedCornerShape(8.dp)
+                                                            )
+                                                            .clickable {
+                                                                NotificationHelper.setNotificationPresetIcon(context, resId)
+                                                                notificationPresetIcon = resId
+                                                                notificationIconType = "preset"
+                                                                Toast.makeText(context, "סמל ההתראה עודכן!", Toast.LENGTH_SHORT).show()
+                                                            }
+                                                            .padding(8.dp)
+                                                            .width(54.dp)
+                                                    ) {
+                                                        Box(
+                                                            modifier = Modifier.size(24.dp),
+                                                            contentAlignment = Alignment.Center
+                                                        ) {
+                                                            if (iconDrawable != null) {
+                                                                val bitmap = Bitmap.createBitmap(
+                                                                    iconDrawable.intrinsicWidth.coerceAtLeast(48),
+                                                                    iconDrawable.intrinsicHeight.coerceAtLeast(48),
+                                                                    Bitmap.Config.ARGB_8888
+                                                                )
+                                                                val canvas = Canvas(bitmap)
+                                                                iconDrawable.setBounds(0, 0, canvas.width, canvas.height)
+                                                                iconDrawable.draw(canvas)
+                                                                androidx.compose.foundation.Image(
+                                                                    bitmap = bitmap.asImageBitmap(),
+                                                                    contentDescription = label,
+                                                                    modifier = Modifier.fillMaxSize()
+                                                                )
+                                                            } else {
+                                                                Icon(
+                                                                    Icons.Default.Star,
+                                                                    contentDescription = label,
+                                                                    tint = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                                                    else MaterialTheme.colorScheme.onSurface
+                                                                )
+                                                            }
+                                                        }
+                                                        Spacer(modifier = Modifier.height(4.dp))
+                                                        Text(
+                                                            text = label,
+                                                            style = MaterialTheme.typography.bodySmall,
+                                                            fontSize = 10.sp,
+                                                            maxLines = 1,
+                                                            overflow = TextOverflow.Ellipsis,
+                                                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                                            else MaterialTheme.colorScheme.onSurfaceVariant
+                                                        )
+                                                    }
+                                                }
+                                            }
+
+                                            Column(
+                                                modifier = Modifier.fillMaxWidth(),
+                                                verticalArrangement = Arrangement.spacedBy(8.dp)
+                                            ) {
+                                                Text(
+                                                    text = "סמל מותאם מהגלריה:",
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                                Row(
+                                                    modifier = Modifier.fillMaxWidth(),
+                                                    verticalAlignment = Alignment.CenterVertically,
+                                                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                                ) {
+                                                    Button(
+                                                        onClick = { galleryLauncher.launch("image/*") },
+                                                        colors = ButtonDefaults.buttonColors(
+                                                            containerColor = MaterialTheme.colorScheme.secondary
+                                                        )
+                                                    ) {
+                                                        Icon(
+                                                            Icons.Default.Edit,
+                                                            contentDescription = null,
+                                                            modifier = Modifier.size(18.dp)
+                                                        )
+                                                        Spacer(modifier = Modifier.width(6.dp))
+                                                        Text("בחר תמונה מהגלריה")
+                                                    }
+
+                                                    if (notificationIconType == "custom" && notificationBitmap != null) {
+                                                        Row(
+                                                            verticalAlignment = Alignment.CenterVertically,
+                                                            modifier = Modifier
+                                                                .clip(RoundedCornerShape(8.dp))
+                                                                .background(MaterialTheme.colorScheme.surfaceVariant)
+                                                                .padding(horizontal = 10.dp, vertical = 6.dp)
+                                                        ) {
+                                                            androidx.compose.foundation.Image(
+                                                                bitmap = notificationBitmap!!.asImageBitmap(),
+                                                                contentDescription = "סמל מותאם נוכחי",
+                                                                modifier = Modifier
+                                                                    .size(24.dp)
+                                                                    .background(Color.DarkGray, shape = CircleShape)
+                                                                    .padding(2.dp)
+                                                            )
+                                                            Spacer(modifier = Modifier.width(8.dp))
+                                                            Text(
+                                                                text = "פעיל",
+                                                                style = MaterialTheme.typography.bodySmall,
+                                                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                                                fontWeight = FontWeight.Bold
+                                                            )
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            DynamicQuickSettingsTileManagementCard(
+                                context = context,
+                                tileTargetPkgs = tileTargetPkgs,
+                                tileAddedStates = tileAddedStates,
+                                onTileRemove = { tileNum ->
+                                    NotificationHelper.setTileAdded(context, tileNum, false)
+                                    tileTargetPkgs[tileNum] = null
+                                    tileAddedStates[tileNum] = false
+                                    Toast.makeText(context, "אריח $tileNum הוסר בהצלחה", Toast.LENGTH_SHORT).show()
+                                },
+                                onSelectTile = { trigger ->
+                                    isSelectingForSequence = NotificationHelper.isSequenceEnabled(context, trigger)
+                                    selectingForTrigger = trigger
+                                },
+                                onAddTileClick = {
+                                    showAddTileDialog = true
+                                },
+                                refreshCounter = refreshCounter,
+                                onRefreshRequest = { refreshCounter++ },
+                                onCustomIconRequest = { tileId ->
+                                    activeTileIdForImageConversion = tileId
+                                    galleryLauncher.launch("image/*")
+                                }
+                            )
+
+                            Spacer(modifier = Modifier.height(32.dp))
+                        }
+                    }
+                }
+                MenuSection.SYSTEM_SETTINGS -> {
+                    Scaffold(
+                        topBar = {
+                            TopAppBar(
+                                title = { Text("הגדרות והרשאות מערכת") },
+                                navigationIcon = {
+                                    IconButton(onClick = { selectedMenuSection = null }) {
+                                        Icon(imageVector = Icons.Default.ArrowBack, contentDescription = "חזרה")
+                                    }
+                                }
+                            )
+                        }
+                    ) { padding ->
+                        Column(
+                            modifier = Modifier
+                                .padding(padding)
+                                .fillMaxSize()
+                                .verticalScroll(rememberScrollState())
+                        ) {
+                            Text(
+                                text = "הגדר אילו אפליקציות ייפתחו אוטומטית בכל פעם שתפעיל את קיצורי הדרך השונים של המכשיר שלך.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                modifier = Modifier.padding(16.dp),
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+
+                            CategoryHeader(title = "הגדרות והרשאות מערכת", icon = Icons.Default.Lock)
+
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.45f)
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Send,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.secondary,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "ניהול בקשות מערכת (Intents)",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = "הגדר פקודות מערכת לביצוע מהיר (כמו חיוג, SMS, ניווט, שליחת בקשות) ושייך אותן למחוות או צור להן קיצורי דרך מעוצבים למסך הבית.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
+                                    )
+                                    
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    
+                                    Button(
+                                        onClick = { isCreatingIntent = true },
+                                        modifier = Modifier.align(Alignment.End),
+                                        colors = ButtonDefaults.buttonColors(
+                                            containerColor = MaterialTheme.colorScheme.secondary
+                                        )
+                                    ) {
+                                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("צור בקשת מערכת חדשה")
+                                    }
+                                    
+                                    if (savedIntentsList.isNotEmpty()) {
+                                        Spacer(modifier = Modifier.height(12.dp))
+                                        Text("בקשות שמורות (${savedIntentsList.size}):", style = MaterialTheme.typography.titleSmall)
+                                        Spacer(modifier = Modifier.height(4.dp))
+                                        savedIntentsList.take(3).forEach { intent ->
+                                            val intentUri = intent.toUri(Intent.URI_INTENT_SCHEME)
+                                            val label = intent.getStringExtra("PINAPP_INTENT_LABEL") ?: "בקשת מערכת"
+                                            Row(
+                                                modifier = Modifier
+                                                    .fillMaxWidth()
+                                                    .padding(vertical = 4.dp)
+                                                    .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.5f), RoundedCornerShape(6.dp))
+                                                    .padding(8.dp),
+                                                verticalAlignment = Alignment.CenterVertically,
+                                                horizontalArrangement = Arrangement.SpaceBetween
+                                            ) {
+                                                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                                                    Icon(Icons.Default.Send, contentDescription = null, modifier = Modifier.size(14.dp), tint = MaterialTheme.colorScheme.secondary)
+                                                    Spacer(modifier = Modifier.width(6.dp))
+                                                    Text(label, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                                }
+                                                Row {
+                                                    IconButton(
+                                                        onClick = {
+                                                            try {
+                                                                val testIntent = Intent.parseUri(intentUri, Intent.URI_INTENT_SCHEME).apply {
+                                                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                                }
+                                                                context.startActivity(testIntent)
+                                                            } catch (e: Exception) {
+                                                                android.widget.Toast.makeText(context, "שגיאה בהפעלה: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                                                            }
+                                                        },
+                                                        modifier = Modifier.size(24.dp)
+                                                    ) {
+                                                        Icon(Icons.Default.PlayArrow, contentDescription = "בדיקה", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                                    }
+                                                    Spacer(modifier = Modifier.width(8.dp))
+                                                    IconButton(
+                                                        onClick = {
+                                                            NotificationHelper.deleteIntent(context, intentUri)
+                                                            savedIntentsList = NotificationHelper.getSavedIntents(context)
+                                                        },
+                                                        modifier = Modifier.size(24.dp)
+                                                    ) {
+                                                        Icon(Icons.Default.Delete, contentDescription = "מחיקה", tint = MaterialTheme.colorScheme.error, modifier = Modifier.size(16.dp))
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.secondaryContainer
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp)
+                                ) {
+                                    Text(
+                                        text = "הגדרת ברירת מחדל במערכת",
+                                        style = MaterialTheme.typography.titleMedium,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "כדי שהקיצורים הללו יפעלו, עליך להגדיר את PINAPP כאפליקציית ברירת המחדל המתאימה במערכת.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer.copy(alpha = 0.85f)
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Button(
+                                            onClick = {
+                                                openSettingsSafely(context, Settings.ACTION_HOME_SETTINGS)
+                                            },
+                                            modifier = Modifier.weight(1f),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                contentColor = MaterialTheme.colorScheme.secondaryContainer
+                                            )
+                                        ) {
+                                            Text("הגדרת מסך בית", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+
+                                        Button(
+                                            onClick = {
+                                                openSettingsSafely(context, Settings.ACTION_VOICE_INPUT_SETTINGS)
+                                            },
+                                            modifier = Modifier.weight(1f),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                                                contentColor = MaterialTheme.colorScheme.secondaryContainer
+                                            )
+                                        ) {
+                                            Text("הגדרת סייען", maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    }
+
+                                    OutlinedButton(
+                                        onClick = {
+                                            openSettingsSafely(context, Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS)
+                                        },
+                                        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                                        colors = ButtonDefaults.outlinedButtonColors(
+                                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                                        )
+                                    ) {
+                                        Text("פתיחת הגדרות ברירת מחדל מלאות")
+                                    }
+                                }
+                            }
+
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = if (hasWriteSettingsPermission) {
+                                        MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.2f)
+                                    } else {
+                                        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+                                    }
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            imageVector = if (hasWriteSettingsPermission) Icons.Default.Check else Icons.Default.Warning,
+                                            contentDescription = null,
+                                            tint = if (hasWriteSettingsPermission) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "שינוי הגדרות מערכת",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = if (hasWriteSettingsPermission) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onErrorContainer
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = "נדרש כדי לשנות את בהירות המסך, זמן כיבוי מסך, או מצב סיבוב מסך אוטומטי מתוך קיצורי הדרך.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = if (hasWriteSettingsPermission) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.85f) else MaterialTheme.colorScheme.onErrorContainer.copy(alpha = 0.85f)
+                                    )
+                                    Spacer(modifier = Modifier.height(12.dp))
+                                    
+                                    if (!hasWriteSettingsPermission) {
+                                        Button(
+                                            onClick = {
+                                                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                                                    val intent = Intent(Settings.ACTION_MANAGE_WRITE_SETTINGS).apply {
+                                                        data = android.net.Uri.parse("package:${context.packageName}")
+                                                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                                    }
+                                                    context.startActivity(intent)
+                                                }
+                                            },
+                                            modifier = Modifier.align(Alignment.End),
+                                            colors = ButtonDefaults.buttonColors(
+                                                containerColor = MaterialTheme.colorScheme.error
+                                            )
+                                        ) {
+                                            Text("הענק הרשאת שינוי הגדרות מערכת")
+                                        }
+                                    } else {
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            horizontalArrangement = Arrangement.End,
+                                            verticalAlignment = Alignment.CenterVertically
+                                        ) {
+                                            Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("ההרשאה מאושרת במכשיר", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.primary)
+                                        }
+                                    }
+                                }
+                            }
+
+                            CategoryHeader(title = "אפשרויות מתקדמות", icon = Icons.Default.Edit)
+
+                            Card(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(horizontal = 16.dp, vertical = 8.dp),
+                                colors = CardDefaults.cardColors(
+                                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                                )
+                            ) {
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(16.dp)
+                                ) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Edit,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.primary,
+                                            modifier = Modifier.size(24.dp)
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(
+                                            text = "אפשרויות מפתחים (עריכת פקודות)",
+                                            style = MaterialTheme.typography.titleMedium,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Spacer(modifier = Modifier.weight(1f))
+                                        Switch(
+                                            checked = isDevModeEnabled,
+                                            onCheckedChange = { checked ->
+                                                isDevModeEnabled = checked
+                                                NotificationHelper.setDevModeEnabled(context, checked)
+                                            }
+                                        )
+                                    }
+                                    Spacer(modifier = Modifier.height(6.dp))
+                                    Text(
+                                        text = "כאשר אפשרות זו פעילה, לפני כל יצירת קיצור דרך, אייקון או סבב פעולות תופיע תיבת דו-שיח המציגה את פקודת ה-Intent המלאה. תוכל לערוך ולבדוק אותה כרצונך לפני השמירה וליהנות מגמישות מרבית.",
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(32.dp))
+                        }
+                    }
+                }
+                else -> {}
             }
         }
     }
@@ -737,71 +1844,379 @@ fun MainScreen(
             }
         )
     }
+
+    if (designerTargetIntentUri != null) {
+        ShortcutDesignerDialogForIntent(
+            intentUri = designerTargetIntentUri!!,
+            intentLabel = designerTargetIntentLabel ?: "בקשת מערכת",
+            onDismiss = {
+                designerTargetIntentUri = null
+                designerTargetIntentLabel = null
+            },
+            onShortcutCreated = {
+                designerTargetIntentUri = null
+                designerTargetIntentLabel = null
+                isSelectingForShortcut = false
+                selectingForTrigger = null
+                searchQuery = ""
+            }
+        )
+    }
+
+    if (devEditTriggerTargetUri != null && devEditTriggerTargetType != null) {
+        DeveloperIntentEditDialog(
+            initialIntentUri = devEditTriggerTargetUri!!,
+            onDismiss = {
+                devEditTriggerTargetUri = null
+                devEditTriggerTargetType = null
+                devEditTriggerIsSequence = false
+            },
+            onConfirm = { editedUri ->
+                saveTriggerTarget(editedUri, devEditTriggerTargetType!!, devEditTriggerIsSequence)
+                devEditTriggerTargetUri = null
+                devEditTriggerTargetType = null
+                devEditTriggerIsSequence = false
+            }
+        )
+    }
+
+    if (showShortcutTypeSelector) {
+        AlertDialog(
+            onDismissRequest = { showShortcutTypeSelector = false },
+            title = {
+                Text(
+                    text = "בחירת סוג קיצור דרך",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Right
+                )
+            },
+            text = {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        text = "בחר איזה סוג של קיצור דרך ברצונך לייצר ולהוסיף למסך הבית:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    
+                    // Simple shortcut to App/Setting
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                showShortcutTypeSelector = false
+                                isSelectingForShortcut = true
+                            }
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), RoundedCornerShape(12.dp)),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Star,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(28.dp)
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "קיצור דרך פשוט (שיוך רגיל)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold
+                                )
+                                Text(
+                                    text = "הפעלת אפליקציה מסוימת, תת-הגדרה פנימית או פקודה בודדת.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+
+                    // Custom Action Sequence Shortcut
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                showShortcutTypeSelector = false
+                                activeSequenceIdForDesign = "seq_${System.currentTimeMillis()}"
+                            }
+                            .border(1.2.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.4f), RoundedCornerShape(12.dp)),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
+                        )
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(16.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(28.dp)
+                            )
+                            Spacer(modifier = Modifier.width(16.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = "קיצור לסבב פעולות (מחזורי)",
+                                    style = MaterialTheme.typography.titleSmall,
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary
+                                )
+                                Text(
+                                    text = "כל לחיצה על האייקון תריץ את הפעולה הבאה ברשימה מותאמת אישית שתגדיר.",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showShortcutTypeSelector = false }) {
+                    Text("ביטול")
+                }
+            }
+        )
+    }
+
+    if (activeSequenceIdForDesign != null) {
+        ShortcutDesignerDialogForSequence(
+            sequenceId = activeSequenceIdForDesign!!,
+            apps = apps,
+            savedIntentsList = savedIntentsList,
+            onDismiss = { activeSequenceIdForDesign = null },
+            onShortcutCreated = {
+                activeSequenceIdForDesign = null
+                isSelectingForShortcut = false
+                selectingForTrigger = null
+                searchQuery = ""
+            }
+        )
+    }
+
+    if (isCreatingIntent) {
+        IntentCreatorDialog(
+            onDismiss = { isCreatingIntent = false },
+            onSaved = {
+                savedIntentsList = NotificationHelper.getSavedIntents(context)
+                isCreatingIntent = false
+            }
+        )
+    }
+
+    if (selectedImageUriForConversion != null) {
+        val tileId = activeTileIdForImageConversion
+        if (tileId != null) {
+            TileIconConverterDialog(
+                selectedUri = selectedImageUriForConversion!!,
+                tileId = tileId,
+                onDismiss = {
+                    selectedImageUriForConversion = null
+                    activeTileIdForImageConversion = null
+                },
+                onIconProcessed = { savedPath ->
+                    NotificationHelper.setTileCustomIcon(context, tileId, savedPath)
+                    selectedImageUriForConversion = null
+                    activeTileIdForImageConversion = null
+                    refreshCounter++
+                    Toast.makeText(context, "סמל אריח $tileId עודכן לסמל מותאם בהצלחה!", Toast.LENGTH_SHORT).show()
+                }
+            )
+        } else {
+            StatusBarIconConverterDialog(
+                selectedUri = selectedImageUriForConversion!!,
+                onDismiss = { selectedImageUriForConversion = null },
+                onIconProcessed = { savedPath ->
+                    NotificationHelper.setNotificationCustomIcon(context, savedPath)
+                    customIconPath = savedPath
+                    notificationIconType = "custom"
+                    selectedImageUriForConversion = null
+                    Toast.makeText(context, "סמל ההתראה עודכן לסמל מותאם בהצלחה!", Toast.LENGTH_SHORT).show()
+                }
+            )
+        }
+    }
+
+    if (showAddTileDialog) {
+        val dormantTiles = (1..15).filter { tileAddedStates[it] != true }
+        AlertDialog(
+            onDismissRequest = { showAddTileDialog = false },
+            title = {
+                Text(
+                    "הוספת אריח מהיר חדש",
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Right
+                )
+            },
+            text = {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Text(
+                        "בחר איזה אריח ברצונך להוסיף מווילון ההתראות המהירות:",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Right,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    
+                    if (dormantTiles.isEmpty()) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 24.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Text(
+                                "הגעת למגבלה! כל 15 האריחים כבר הופעלו. לא ניתן להוסיף אריחים חדשים.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.error,
+                                fontWeight = FontWeight.Bold,
+                                textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                            )
+                        }
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .heightIn(max = 300.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            items(dormantTiles) { tileNum ->
+                                Card(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            NotificationHelper.setTileAdded(context, tileNum, true)
+                                            tileAddedStates[tileNum] = true
+                                            showAddTileDialog = false
+                                            Toast.makeText(context, "אריח $tileNum הופעל בהצלחה!", Toast.LENGTH_SHORT).show()
+                                        },
+                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(16.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Icon(Icons.Default.Add, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column {
+                                            Text("אריח מהיר $tileNum", fontWeight = FontWeight.Bold)
+                                            Text("הפעלת אריח מס' $tileNum מווילון ההתראות המהירות", style = MaterialTheme.typography.bodySmall)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { showAddTileDialog = false }) {
+                    Text("ביטול")
+                }
+            }
+        )
+    }
+}
+
+fun resolveTargetLabel(context: Context, target: String?): String {
+    if (target == null) return "לא הוגדרה פעולה"
+    val isIntent = target.startsWith("intent:")
+    if (isIntent) {
+        return try {
+            val intent = Intent.parseUri(target, Intent.URI_INTENT_SCHEME)
+            intent.getStringExtra("PINAPP_INTENT_LABEL") ?: "בקשת מערכת מותאמת"
+        } catch (e: Exception) {
+            "בקשת מערכת מותאמת"
+        }
+    } else {
+        val pm = context.packageManager
+        val pkg = if (target.contains("/")) target.split("/")[0] else target
+        val cls = if (target.contains("/")) target.split("/")[1] else null
+        return try {
+            val appAi = pm.getApplicationInfo(pkg, 0)
+            val appLabelStr = pm.getApplicationLabel(appAi).toString()
+            if (cls != null) {
+                try {
+                    val compName = android.content.ComponentName(pkg, cls)
+                    val activityInfo = pm.getActivityInfo(compName, 0)
+                    val actLabel = activityInfo.loadLabel(pm).toString()
+                    if (actLabel != appLabelStr && actLabel.isNotEmpty()) {
+                        "$appLabelStr - $actLabel"
+                    } else {
+                        "$appLabelStr (${cls.substringAfterLast('.')})"
+                    }
+                } catch (e: Exception) {
+                    "$appLabelStr (${cls.substringAfterLast('.')})"
+                }
+            } else {
+                appLabelStr
+            }
+        } catch (e: Exception) {
+            target
+        }
+    }
+}
+
+fun resolveTargetIcon(context: Context, target: String?): Any? {
+    if (target == null) return null
+    val isIntent = target.startsWith("intent:")
+    if (isIntent) return null
+    val pkg = if (target.contains("/")) target.split("/")[0] else target
+    return try {
+        context.packageManager.getApplicationIcon(pkg)
+    } catch (e: Exception) {
+        null
+    }
 }
 
 @Composable
 fun TriggerConfigCard(
     title: String,
     description: String,
-    targetPkg: String?,
+    type: TriggerType,
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    targetPkg: String?,
     onSelectClick: () -> Unit,
-    onClearClick: () -> Unit
+    onClearClick: () -> Unit,
+    refreshCounter: Int,
+    onRefreshRequest: () -> Unit,
+    modifier: Modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
 ) {
     val context = LocalContext.current
-    val pm = context.packageManager
     
-    val parsedPkg = remember(targetPkg) {
-        if (targetPkg == null) null else {
-            if (targetPkg.contains("/")) targetPkg.split("/")[0] else targetPkg
-        }
-    }
+    var isSequenceEnabled by remember(type) { mutableStateOf(NotificationHelper.isSequenceEnabled(context, type)) }
+    var sequenceList by remember(type) { mutableStateOf(NotificationHelper.getSequence(context, type)) }
+    var nextIndex by remember(type) { mutableStateOf(NotificationHelper.getSequenceIndex(context, type)) }
 
-    val appLabel = remember(targetPkg) {
-        if (targetPkg == null) null else {
-            val pkg = if (targetPkg.contains("/")) targetPkg.split("/")[0] else targetPkg
-            val cls = if (targetPkg.contains("/")) targetPkg.split("/")[1] else null
-            try {
-                val appAi = pm.getApplicationInfo(pkg, 0)
-                val appLabelStr = pm.getApplicationLabel(appAi).toString()
-                if (cls != null) {
-                    try {
-                        val compName = android.content.ComponentName(pkg, cls)
-                        val activityInfo = pm.getActivityInfo(compName, 0)
-                        val actLabel = activityInfo.loadLabel(pm).toString()
-                        if (actLabel != appLabelStr && actLabel.isNotEmpty()) {
-                            "$appLabelStr - $actLabel"
-                        } else {
-                            "$appLabelStr (${cls.substringAfterLast('.')})"
-                        }
-                    } catch (e: Exception) {
-                        "$appLabelStr (${cls.substringAfterLast('.')})"
-                    }
-                } else {
-                    appLabelStr
-                }
-            } catch (e: Exception) {
-                targetPkg
-            }
-        }
-    }
-    val appIcon = remember(parsedPkg) {
-        if (parsedPkg == null) null else {
-            try {
-                pm.getApplicationIcon(parsedPkg)
-            } catch (e: Exception) {
-                null
-            }
-        }
+    LaunchedEffect(type, refreshCounter) {
+        isSequenceEnabled = NotificationHelper.isSequenceEnabled(context, type)
+        sequenceList = NotificationHelper.getSequence(context, type)
+        nextIndex = NotificationHelper.getSequenceIndex(context, type)
     }
 
     Card(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 8.dp),
+        modifier = modifier.fillMaxWidth(),
         colors = CardDefaults.cardColors(
-            containerColor = if (targetPkg != null) 
-                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+            containerColor = if (isSequenceEnabled || targetPkg != null) 
+                MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.25f)
             else 
                 MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
         )
@@ -811,6 +2226,7 @@ fun TriggerConfigCard(
                 .fillMaxWidth()
                 .padding(16.dp)
         ) {
+            // Header Row
             Row(
                 verticalAlignment = Alignment.CenterVertically,
                 modifier = Modifier.fillMaxWidth()
@@ -825,7 +2241,8 @@ fun TriggerConfigCard(
                 Text(
                     text = title,
                     style = MaterialTheme.typography.titleMedium,
-                    color = MaterialTheme.colorScheme.onSurface
+                    color = MaterialTheme.colorScheme.onSurface,
+                    fontWeight = FontWeight.Bold
                 )
             }
             Spacer(modifier = Modifier.height(6.dp))
@@ -835,79 +2252,378 @@ fun TriggerConfigCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )
             
+            Spacer(modifier = Modifier.height(16.dp))
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
             Spacer(modifier = Modifier.height(12.dp))
 
-            // Current target app info
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(vertical = 4.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                if (targetPkg != null) {
-                    if (appIcon != null) {
-                        AsyncImage(
-                            model = appIcon,
-                            contentDescription = appLabel,
-                            modifier = Modifier.size(40.dp)
-                        )
-                    }
-                    Spacer(modifier = Modifier.width(12.dp))
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = appLabel ?: "",
-                            style = MaterialTheme.typography.bodyLarge,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                        Text(
-                            text = targetPkg,
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
-                        )
-                    }
-                } else {
-                    Box(
-                        modifier = Modifier
-                            .weight(1f)
-                            .padding(vertical = 8.dp)
-                    ) {
-                        Text(
-                            text = "לא מוגדר (הגדרת ברירת המחדל של המכשיר)",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Action Buttons
+            // Sequence Mode Toggle
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                if (targetPkg != null) {
-                    TextButton(
-                        onClick = onClearClick,
-                        colors = ButtonDefaults.textButtonColors(
-                            contentColor = MaterialTheme.colorScheme.error
+                Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                    Icon(
+                        imageVector = Icons.Default.Refresh,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Column {
+                        Text(
+                            text = "מצב סט פעולות מחזורי (סבב)",
+                            style = MaterialTheme.typography.bodyLarge,
+                            fontWeight = FontWeight.SemiBold,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "בלחיצה הבאה, המערכת תעבור לפעולה הבאה ברשימה",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+                Switch(
+                    checked = isSequenceEnabled,
+                    onCheckedChange = { checked ->
+                        NotificationHelper.setSequenceEnabled(context, type, checked)
+                        onRefreshRequest()
+                        val msg = if (checked) "מצב סבב פעולות הופעל!" else "מצב סבב פעולות כובה"
+                        Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            if (isSequenceEnabled) {
+                // SEQUENCE VIEW MODE
+                Text(
+                    text = "רשימת הפעולות בסבב (לפי סדר ההרצה):",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(bottom = 8.dp)
+                )
+
+                if (sequenceList.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(8.dp))
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(
+                                text = "אין פעולות בסבב הנוכחי.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Button(
+                                onClick = onSelectClick
+                            ) {
+                                Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                                Spacer(modifier = Modifier.width(4.dp))
+                                Text("הוסף פעולה ראשונה לסבב")
+                            }
+                        }
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                            .padding(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        sequenceList.forEachIndexed { index, target ->
+                            val label = resolveTargetLabel(context, target)
+                            val iconDrawable = resolveTargetIcon(context, target)
+                            val isCurrentActive = index == nextIndex
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(
+                                        if (isCurrentActive) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f)
+                                        else MaterialTheme.colorScheme.surface,
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .border(
+                                        width = if (isCurrentActive) 1.5.dp else 1.dp,
+                                        color = if (isCurrentActive) MaterialTheme.colorScheme.primary
+                                        else MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f),
+                                        shape = RoundedCornerShape(8.dp)
+                                    )
+                                    .padding(8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Step Indicator & Icon
+                                Box(
+                                    modifier = Modifier
+                                        .size(28.dp)
+                                        .background(
+                                            if (isCurrentActive) MaterialTheme.colorScheme.primary
+                                            else MaterialTheme.colorScheme.secondaryContainer,
+                                            CircleShape
+                                        ),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = (index + 1).toString(),
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isCurrentActive) MaterialTheme.colorScheme.onPrimary
+                                        else MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(10.dp))
+
+                                if (iconDrawable != null) {
+                                    AsyncImage(
+                                        model = iconDrawable,
+                                        contentDescription = label,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(32.dp)
+                                            .background(MaterialTheme.colorScheme.tertiaryContainer, CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Send,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.width(10.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = if (isCurrentActive) FontWeight.Bold else FontWeight.Normal,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        if (isCurrentActive) {
+                                            Spacer(modifier = Modifier.width(6.dp))
+                                            Surface(
+                                                color = MaterialTheme.colorScheme.primary,
+                                                shape = RoundedCornerShape(4.dp)
+                                            ) {
+                                                Text(
+                                                    text = "הפעלה הבאה",
+                                                    style = MaterialTheme.typography.labelSmall,
+                                                    color = MaterialTheme.colorScheme.onPrimary,
+                                                    modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                    Text(
+                                        text = target,
+                                        style = MaterialTheme.typography.bodySmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                // Reordering and Delete Buttons
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(
+                                        onClick = {
+                                            NotificationHelper.moveSequenceTarget(context, type, index, true)
+                                            onRefreshRequest()
+                                        },
+                                        enabled = index > 0,
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.KeyboardArrowUp,
+                                            contentDescription = "הזז למעלה",
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            NotificationHelper.moveSequenceTarget(context, type, index, false)
+                                            onRefreshRequest()
+                                        },
+                                        enabled = index < sequenceList.size - 1,
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.KeyboardArrowDown,
+                                            contentDescription = "הזז למטה",
+                                            modifier = Modifier.size(20.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            NotificationHelper.removeSequenceTargetAt(context, type, index)
+                                            onRefreshRequest()
+                                            Toast.makeText(context, "הפעולה הוסרה מהסבב", Toast.LENGTH_SHORT).show()
+                                        },
+                                        modifier = Modifier.size(28.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "מחק",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(18.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    // Sequence Control Row
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        TextButton(
+                            onClick = {
+                                NotificationHelper.setSequenceIndex(context, type, 0)
+                                onRefreshRequest()
+                                Toast.makeText(context, "איפוס המדד בוצע בהצלחה", Toast.LENGTH_SHORT).show()
+                            }
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("אפס סבב לראשון")
+                        }
+
+                        Button(
+                            onClick = onSelectClick,
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = MaterialTheme.colorScheme.secondary
+                            )
+                        ) {
+                            Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                            Spacer(modifier = Modifier.width(4.dp))
+                            Text("הוסף פעולה לסבב")
+                        }
+                    }
+                }
+            } else {
+                // SINGLE ACTION VIEW MODE
+                val isIntent = remember(targetPkg) {
+                    targetPkg?.startsWith("intent:") == true
+                }
+                val parsedPkg = remember(targetPkg, isIntent) {
+                    if (targetPkg == null || isIntent) null else {
+                        if (targetPkg.contains("/")) targetPkg.split("/")[0] else targetPkg
+                    }
+                }
+                val appLabel = remember(targetPkg, isIntent) {
+                    resolveTargetLabel(context, targetPkg)
+                }
+                val appIcon = remember(parsedPkg) {
+                    resolveTargetIcon(context, targetPkg)
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    if (targetPkg != null) {
+                        if (isIntent) {
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(MaterialTheme.colorScheme.tertiaryContainer, CircleShape),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Send,
+                                    contentDescription = null,
+                                    tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                    modifier = Modifier.size(20.dp)
+                                )
+                            }
+                        } else if (appIcon != null) {
+                            AsyncImage(
+                                model = appIcon,
+                                contentDescription = appLabel,
+                                modifier = Modifier.size(40.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(12.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = appLabel,
+                                style = MaterialTheme.typography.bodyLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = targetPkg,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                    } else {
+                        Box(
+                            modifier = Modifier
+                                .weight(1f)
+                                .padding(vertical = 8.dp)
+                        ) {
+                            Text(
+                                text = "לא מוגדר (הגדרת ברירת המחדל של המכשיר)",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.65f)
+                            )
+                        }
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                // Action Buttons for Single Target
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.End
+                ) {
+                    if (targetPkg != null) {
+                        TextButton(
+                            onClick = onClearClick,
+                            colors = ButtonDefaults.textButtonColors(
+                                contentColor = MaterialTheme.colorScheme.error
+                            )
+                        ) {
+                            Text("הסר")
+                        }
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Button(
+                        onClick = onSelectClick,
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
                         )
                     ) {
-                        Text("הסר")
+                        Text(if (targetPkg != null) "שנה אפליקציה" else "בחר אפליקציה")
                     }
-                    Spacer(modifier = Modifier.width(8.dp))
-                }
-                Button(
-                    onClick = onSelectClick,
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Text(if (targetPkg != null) "שנה אפליקציה" else "בחר אפליקציה")
                 }
             }
         }
@@ -979,10 +2695,24 @@ fun ShortcutDesignerDialog(
 ) {
     val context = LocalContext.current
     var label by remember { mutableStateOf(activity?.loadLabel(context.packageManager)?.toString()?.takeIf { it.isNotEmpty() } ?: app.label) }
-    var iconSource by remember { mutableStateOf("original") } // "original", "original_bg", "emoji"
+    var iconSource by remember { mutableStateOf("original") } // "original", "original_bg", "emoji", "custom_image"
+    val isDevMode = remember { NotificationHelper.isDevModeEnabled(context) }
+    var showDevEditDialog by remember { mutableStateOf(false) }
+    var devEditUri by remember { mutableStateOf("") }
+    var pendingBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
     var selectedEmoji by remember { mutableStateOf("📱") }
     var selectedColor by remember { mutableStateOf(0xFF2196F3.toInt()) }
     var selectedShape by remember { mutableStateOf("circle") } // "circle", "squircle", "square"
+
+    var customImageUri by remember { mutableStateOf<Uri?>(null) }
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            customImageUri = uri
+            iconSource = "custom_image"
+        }
+    }
 
     val colors = listOf(
         0xFF2196F3.toInt(), // Blue
@@ -1058,6 +2788,13 @@ fun ShortcutDesignerDialog(
                     Box(
                         modifier = Modifier
                             .size(80.dp)
+                            .let {
+                                if (iconSource != "original") {
+                                    it.clip(shape)
+                                } else {
+                                    it
+                                }
+                            }
                             .background(
                                 if (iconSource == "original") Color.Transparent else Color(selectedColor),
                                 shape
@@ -1087,6 +2824,22 @@ fun ShortcutDesignerDialog(
                             "emoji" -> {
                                 Text(text = selectedEmoji, fontSize = 40.sp)
                             }
+                            "custom_image" -> {
+                                if (customImageUri != null) {
+                                    AsyncImage(
+                                        model = customImageUri,
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Add,
+                                        contentDescription = "בחר תמונה",
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                }
+                            }
                         }
                     }
                     Spacer(modifier = Modifier.height(8.dp))
@@ -1109,21 +2862,43 @@ fun ShortcutDesignerDialog(
 
                 // Icon Source selector
                 Text("מקור האייקון:", style = MaterialTheme.typography.titleSmall)
-                Row(
+                LazyRow(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 4.dp)
                 ) {
-                    listOf(
+                    items(listOf(
                         "original" to "מקורי",
                         "original_bg" to "רקע מותאם",
-                        "emoji" to "אימוג'י"
-                    ).forEach { (src, name) ->
+                        "emoji" to "אימוג'י",
+                        "custom_image" to "גלריה (תמונה)"
+                    )) { (src, name) ->
                         FilterChip(
                             selected = iconSource == src,
-                            onClick = { iconSource = src },
-                            label = { Text(name) },
-                            modifier = Modifier.weight(1f)
+                            onClick = {
+                                if (src == "custom_image" && customImageUri == null) {
+                                    imagePickerLauncher.launch("image/*")
+                                } else {
+                                    iconSource = src
+                                }
+                            },
+                            label = { Text(name) }
                         )
+                    }
+                }
+
+                if (iconSource == "custom_image") {
+                    Button(
+                        onClick = { imagePickerLauncher.launch("image/*") },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    ) {
+                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("בחר תמונה אחרת מהגלריה")
                     }
                 }
 
@@ -1224,24 +2999,61 @@ fun ShortcutDesignerDialog(
                                 selectedShape
                             )
                         }
+                        "custom_image" -> {
+                            if (customImageUri != null) {
+                                ShortcutHelper.generateCustomImageIcon(
+                                    context,
+                                    customImageUri!!,
+                                    selectedColor,
+                                    selectedShape
+                                )
+                            } else {
+                                android.widget.Toast.makeText(context, "נא לבחור תמונה מהגלריה", android.widget.Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                        }
                         else -> {
                             null
                         }
                     }
 
-                    val success = ShortcutHelper.createShortcut(
-                        context = context,
-                        label = label,
-                        packageName = app.packageName,
-                        className = activity?.name,
-                        customIcon = bitmap
-                    )
+                    val originalIntent = Intent(Intent.ACTION_MAIN).apply {
+                        if (app.packageName != null) {
+                            if (activity?.name != null) {
+                                setClassName(app.packageName, activity.name)
+                            } else {
+                                val pm = context.packageManager
+                                val launchIntent = pm.getLaunchIntentForPackage(app.packageName)
+                                if (launchIntent != null) {
+                                    component = launchIntent.component
+                                } else {
+                                    setClassName(app.packageName, "")
+                                }
+                            }
+                        }
+                        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    val originalUri = originalIntent.toUri(Intent.URI_INTENT_SCHEME)
 
-                    if (success) {
-                        android.widget.Toast.makeText(context, "קיצור הדרך נוצר בהצלחה!", android.widget.Toast.LENGTH_SHORT).show()
-                        onShortcutCreated()
+                    if (isDevMode) {
+                        pendingBitmap = bitmap
+                        devEditUri = originalUri
+                        showDevEditDialog = true
                     } else {
-                        android.widget.Toast.makeText(context, "שגיאה ביצירת קיצור הדרך", android.widget.Toast.LENGTH_SHORT).show()
+                        val success = ShortcutHelper.createShortcut(
+                            context = context,
+                            label = label,
+                            packageName = app.packageName,
+                            className = activity?.name,
+                            customIcon = bitmap
+                        )
+
+                        if (success) {
+                            android.widget.Toast.makeText(context, "קיצור הדרך נוצר בהצלחה!", android.widget.Toast.LENGTH_SHORT).show()
+                            onShortcutCreated()
+                        } else {
+                            android.widget.Toast.makeText(context, "שגיאה ביצירת קיצור הדרך", android.widget.Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             ) {
@@ -1254,15 +3066,40 @@ fun ShortcutDesignerDialog(
             }
         }
     )
+
+    if (showDevEditDialog) {
+        DeveloperIntentEditDialog(
+            initialIntentUri = devEditUri,
+            onDismiss = { showDevEditDialog = false },
+            onConfirm = { editedUri ->
+                showDevEditDialog = false
+                val success = ShortcutHelper.createShortcut(
+                    context = context,
+                    label = label,
+                    packageName = null,
+                    className = null,
+                    customIcon = pendingBitmap,
+                    intentUri = editedUri
+                )
+                if (success) {
+                    android.widget.Toast.makeText(context, "קיצור הדרך נוצר בהצלחה!", android.widget.Toast.LENGTH_SHORT).show()
+                    onShortcutCreated()
+                } else {
+                    android.widget.Toast.makeText(context, "שגיאה ביצירת קיצור הדרך", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
 }
 
 object ShortcutHelper {
     fun createShortcut(
         context: Context,
         label: String,
-        packageName: String,
+        packageName: String?,
         className: String?,
-        customIcon: Bitmap? = null
+        customIcon: Bitmap? = null,
+        intentUri: String? = null
     ): Boolean {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
             return false
@@ -1275,37 +3112,55 @@ object ShortcutHelper {
             return false
         }
 
-        val launchIntent = Intent(Intent.ACTION_MAIN).apply {
-            if (className != null) {
-                setClassName(packageName, className)
-            } else {
-                val pm = context.packageManager
-                val intent = pm.getLaunchIntentForPackage(packageName)
-                if (intent != null) {
-                    component = intent.component
-                } else {
-                    setClassName(packageName, "")
+        val launchIntent = if (intentUri != null) {
+            try {
+                Intent.parseUri(intentUri, Intent.URI_INTENT_SCHEME).apply {
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 }
+            } catch (e: Exception) {
+                e.printStackTrace()
+                return false
             }
-            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        } else {
+            Intent(Intent.ACTION_MAIN).apply {
+                if (packageName != null) {
+                    if (className != null) {
+                        setClassName(packageName, className)
+                    } else {
+                        val pm = context.packageManager
+                        val intent = pm.getLaunchIntentForPackage(packageName)
+                        if (intent != null) {
+                            component = intent.component
+                        } else {
+                            setClassName(packageName, "")
+                        }
+                    }
+                }
+                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            }
         }
 
-        val id = "shortcut_${packageName}_${className ?: "main"}_${System.currentTimeMillis()}"
+        val id = "shortcut_${packageName ?: "intent"}_${className ?: "main"}_${System.currentTimeMillis()}"
 
         val icon = if (customIcon != null) {
-            Icon.createWithBitmap(customIcon)
+            android.graphics.drawable.Icon.createWithBitmap(customIcon)
         } else {
             try {
-                val appIconDrawable = context.packageManager.getApplicationIcon(packageName)
-                val bitmap = drawableToBitmap(appIconDrawable)
-                Icon.createWithBitmap(bitmap)
+                if (packageName != null) {
+                    val appIconDrawable = context.packageManager.getApplicationIcon(packageName)
+                    val bitmap = drawableToBitmap(appIconDrawable)
+                    android.graphics.drawable.Icon.createWithBitmap(bitmap)
+                } else {
+                    val ownIcon = context.packageManager.getApplicationIcon(context.packageName)
+                    android.graphics.drawable.Icon.createWithBitmap(drawableToBitmap(ownIcon))
+                }
             } catch (e: Exception) {
                 try {
                     val ownIcon = context.packageManager.getApplicationIcon(context.packageName)
-                    Icon.createWithBitmap(drawableToBitmap(ownIcon))
+                    android.graphics.drawable.Icon.createWithBitmap(drawableToBitmap(ownIcon))
                 } catch (e2: Exception) {
                     val defIcon = context.packageManager.defaultActivityIcon
-                    Icon.createWithBitmap(drawableToBitmap(defIcon))
+                    android.graphics.drawable.Icon.createWithBitmap(drawableToBitmap(defIcon))
                 }
             }
         }
@@ -1412,4 +3267,2812 @@ object ShortcutHelper {
 
         return bitmap
     }
+
+    fun generateCustomImageIcon(
+        context: Context,
+        uri: Uri,
+        backgroundColor: Int,
+        shape: String
+    ): Bitmap? {
+        val srcBitmap = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                val source = ImageDecoder.createSource(context.contentResolver, uri)
+                ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+                    decoder.isMutableRequired = true
+                }
+            } else {
+                @Suppress("DEPRECATION")
+                MediaStore.Images.Media.getBitmap(context.contentResolver, uri)
+            }
+        } catch (e: Exception) {
+            e.printStackTrace()
+            null
+        } ?: return null
+
+        val size = 192
+        val output = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(output)
+        
+        // 1. Draw Background shape
+        val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = backgroundColor
+            style = Paint.Style.FILL
+        }
+        val rect = RectF(0f, 0f, size.toFloat(), size.toFloat())
+        when (shape) {
+            "circle" -> canvas.drawOval(rect, paint)
+            "squircle" -> {
+                val radius = size * 0.35f
+                canvas.drawRoundRect(rect, radius, radius, paint)
+            }
+            else -> {
+                val radius = size * 0.15f
+                canvas.drawRoundRect(rect, radius, radius, paint)
+            }
+        }
+
+        // 2. Draw scaled and cropped source bitmap onto the canvas
+        val maskBitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val maskCanvas = Canvas(maskBitmap)
+        val maskPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+            color = 0xFFFFFFFF.toInt()
+            style = Paint.Style.FILL
+        }
+        when (shape) {
+            "circle" -> maskCanvas.drawOval(rect, maskPaint)
+            "squircle" -> {
+                val radius = size * 0.35f
+                maskCanvas.drawRoundRect(rect, radius, radius, maskPaint)
+            }
+            else -> {
+                val radius = size * 0.15f
+                maskCanvas.drawRoundRect(rect, radius, radius, maskPaint)
+            }
+        }
+
+        val srcWidth = srcBitmap.width
+        val srcHeight = srcBitmap.height
+        val srcAspect = srcWidth.toFloat() / srcHeight.toFloat()
+        
+        val srcRect = if (srcAspect > 1.0f) {
+            val newWidth = srcHeight
+            val offset = (srcWidth - newWidth) / 2
+            Rect(offset, 0, offset + newWidth, srcHeight)
+        } else {
+            val newHeight = srcWidth
+            val offset = (srcHeight - newHeight) / 2
+            Rect(0, offset, srcWidth, offset + newHeight)
+        }
+
+        val maskedBitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+        val maskedCanvas = Canvas(maskedBitmap)
+        val drawPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+        
+        maskedCanvas.drawBitmap(srcBitmap, srcRect, Rect(0, 0, size, size), drawPaint)
+        
+        drawPaint.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_IN)
+        maskedCanvas.drawBitmap(maskBitmap, 0f, 0f, drawPaint)
+        
+        canvas.drawBitmap(maskedBitmap, 0f, 0f, null)
+        
+        try {
+            maskBitmap.recycle()
+            maskedBitmap.recycle()
+            srcBitmap.recycle()
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+        
+        return output
+    }
 }
+
+@Composable
+fun ShortcutDesignerDialogForIntent(
+    intentUri: String,
+    intentLabel: String,
+    onDismiss: () -> Unit,
+    onShortcutCreated: () -> Unit
+) {
+    val context = LocalContext.current
+    var label by remember { mutableStateOf(intentLabel) }
+    val isDevMode = remember { NotificationHelper.isDevModeEnabled(context) }
+    var showDevEditDialog by remember { mutableStateOf(false) }
+    var devEditUri by remember { mutableStateOf("") }
+    var pendingBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var selectedColor by remember { mutableStateOf(0xFF1E88E5.toInt()) }
+    var selectedShape by remember { mutableStateOf("circle") } // circle, squircle, square
+    var selectedEmoji by remember { mutableStateOf("⚡") }
+    var iconSource by remember { mutableStateOf("emoji") } // "emoji", "custom_image"
+    
+    var customImageUri by remember { mutableStateOf<Uri?>(null) }
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            customImageUri = uri
+            iconSource = "custom_image"
+        }
+    }
+    
+    val colors = listOf(
+        0xFF1E88E5.toInt(), // Blue
+        0xFF43A047.toInt(), // Green
+        0xFFE53935.toInt(), // Red
+        0xFFFDD835.toInt(), // Yellow
+        0xFF8E24AA.toInt(), // Purple
+        0xFFFB8C00.toInt(), // Orange
+        0xFF00ACC1.toInt(), // Cyan
+        0xFF5D4037.toInt()  // Brown
+    )
+
+    val emojis = listOf("⚡", "📞", "✉️", "🌐", "⏰", "🗺️", "⚙️", "📱", "🏠", "🌟", "🔥", "🚀", "❤️", "🔔", "🎮", "🎵")
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("עיצוב אייקון לקיצור הדרך") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Label TextField
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    label = { Text("שם קיצור הדרך") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                // Visual Preview Card
+                Text("תצוגה מקדימה:", style = MaterialTheme.typography.titleSmall)
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val shape = when (selectedShape) {
+                        "circle" -> CircleShape
+                        "squircle" -> RoundedCornerShape(24.dp)
+                        else -> RoundedCornerShape(12.dp)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(shape)
+                            .background(
+                                color = Color(selectedColor),
+                                shape = shape
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                                shape = shape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        when (iconSource) {
+                            "emoji" -> {
+                                Text(text = selectedEmoji, fontSize = 36.sp)
+                            }
+                            "custom_image" -> {
+                                if (customImageUri != null) {
+                                    AsyncImage(
+                                        model = customImageUri,
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Add,
+                                        contentDescription = "בחר תמונה",
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Background Shape
+                Text("בחר צורה:", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    listOf(
+                        "circle" to "עיגול",
+                        "squircle" to "ריבוע מעוגל",
+                        "square" to "ריבוע"
+                    ).forEach { (shape, name) ->
+                        val isSelected = selectedShape == shape
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { selectedShape = shape },
+                            label = { Text(name) }
+                        )
+                    }
+                }
+
+                // Background Color Selector
+                Text("בחר צבע רקע:", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    colors.forEach { colorValue ->
+                        val isSelected = selectedColor == colorValue
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(Color(colorValue), CircleShape)
+                                .border(
+                                    width = if (isSelected) 3.dp else 1.dp,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                    shape = CircleShape
+                                )
+                                .clickable { selectedColor = colorValue }
+                        )
+                    }
+                }
+
+                // Icon Source selector
+                Text("מקור האייקון:", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        "emoji" to "אימוג'י",
+                        "custom_image" to "גלריה (תמונה)"
+                    ).forEach { (src, name) ->
+                        FilterChip(
+                            selected = iconSource == src,
+                            onClick = {
+                                if (src == "custom_image" && customImageUri == null) {
+                                    imagePickerLauncher.launch("image/*")
+                                } else {
+                                    iconSource = src
+                                }
+                            },
+                            label = { Text(name) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                if (iconSource == "custom_image") {
+                    Button(
+                        onClick = { imagePickerLauncher.launch("image/*") },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    ) {
+                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("בחר תמונה אחרת מהגלריה")
+                    }
+                }
+
+                if (iconSource == "emoji") {
+                    // Emoji Selector
+                    Text("בחר אימוג'י:", style = MaterialTheme.typography.titleSmall)
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(vertical = 4.dp)
+                    ) {
+                        items(emojis) { emoji ->
+                            val isSelected = selectedEmoji == emoji
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(
+                                        if (isSelected) MaterialTheme.colorScheme.secondaryContainer 
+                                        else Color.Transparent, 
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable { selectedEmoji = emoji },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(text = emoji, fontSize = 24.sp)
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (label.isBlank()) {
+                        android.widget.Toast.makeText(context, "נא להזין שם לקיצור הדרך", android.widget.Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+
+                    val bitmap = when (iconSource) {
+                        "emoji" -> {
+                            ShortcutHelper.generateEmojiIcon(
+                                context,
+                                selectedEmoji,
+                                selectedColor,
+                                selectedShape
+                            )
+                        }
+                        "custom_image" -> {
+                            if (customImageUri != null) {
+                                ShortcutHelper.generateCustomImageIcon(
+                                    context,
+                                    customImageUri!!,
+                                    selectedColor,
+                                    selectedShape
+                                )
+                            } else {
+                                android.widget.Toast.makeText(context, "נא לבחור תמונה מהגלריה", android.widget.Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                        }
+                        else -> null
+                    }
+
+                    if (isDevMode) {
+                        pendingBitmap = bitmap
+                        devEditUri = intentUri
+                        showDevEditDialog = true
+                    } else {
+                        val success = ShortcutHelper.createShortcut(
+                            context = context,
+                            label = label,
+                            packageName = null,
+                            className = null,
+                            customIcon = bitmap,
+                            intentUri = intentUri
+                        )
+
+                        if (success) {
+                            android.widget.Toast.makeText(context, "קיצור הדרך נוצר בהצלחה!", android.widget.Toast.LENGTH_SHORT).show()
+                            onShortcutCreated()
+                        } else {
+                            android.widget.Toast.makeText(context, "שגיאה ביצירת קיצור הדרך", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            ) {
+                Text("ייצר קיצור דרך")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("ביטול")
+            }
+        }
+    )
+
+    if (showDevEditDialog) {
+        DeveloperIntentEditDialog(
+            initialIntentUri = devEditUri,
+            onDismiss = { showDevEditDialog = false },
+            onConfirm = { editedUri ->
+                showDevEditDialog = false
+                val success = ShortcutHelper.createShortcut(
+                    context = context,
+                    label = label,
+                    packageName = null,
+                    className = null,
+                    customIcon = pendingBitmap,
+                    intentUri = editedUri
+                )
+                if (success) {
+                    android.widget.Toast.makeText(context, "קיצור הדרך נוצר בהצלחה!", android.widget.Toast.LENGTH_SHORT).show()
+                    onShortcutCreated()
+                } else {
+                    android.widget.Toast.makeText(context, "שגיאה ביצירת קיצור הדרך", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun SequenceActionPickerDialog(
+    apps: List<AppInfo>,
+    savedIntentsList: List<Intent>,
+    onDismiss: () -> Unit,
+    onActionSelected: (String) -> Unit
+) {
+    var searchQuery by remember { mutableStateOf("") }
+    var selectedTab by remember { mutableStateOf(0) } // 0: Apps, 1: Custom Intents
+    
+    val filteredApps = remember(searchQuery, apps) {
+        if (searchQuery.isBlank()) apps else {
+            apps.filter { it.label.contains(searchQuery, ignoreCase = true) || it.packageName.contains(searchQuery, ignoreCase = true) }
+        }
+    }
+    
+    val filteredIntents = remember(searchQuery, savedIntentsList) {
+        if (searchQuery.isBlank()) savedIntentsList else {
+            savedIntentsList.filter { 
+                val label = it.getStringExtra("PINAPP_INTENT_LABEL") ?: "בקשת מערכת"
+                label.contains(searchQuery, ignoreCase = true)
+            }
+        }
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                "בחירת פעולה להוספה לסבב",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Right
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(400.dp)
+            ) {
+                // Search Bar
+                OutlinedTextField(
+                    value = searchQuery,
+                    onValueChange = { searchQuery = it },
+                    placeholder = { Text("חיפוש אפליקציה..." ) },
+                    leadingIcon = { Icon(Icons.Default.Search, contentDescription = null) },
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                    singleLine = true
+                )
+                
+                // Tabs
+                TabRow(selectedTabIndex = selectedTab, modifier = Modifier.padding(bottom = 8.dp)) {
+                    Tab(selected = selectedTab == 0, onClick = { selectedTab = 0 }) {
+                        Text("אפליקציות", modifier = Modifier.padding(vertical = 10.dp))
+                    }
+                    Tab(selected = selectedTab == 1, onClick = { selectedTab = 1 }) {
+                        Text("פקודות מערכת", modifier = Modifier.padding(vertical = 10.dp))
+                    }
+                }
+                
+                // Content
+                Box(modifier = Modifier.weight(1f)) {
+                    if (selectedTab == 0) {
+                        LazyColumn(modifier = Modifier.fillMaxSize()) {
+                            items(filteredApps, key = { it.packageName }) { app ->
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clickable {
+                                            onActionSelected(app.packageName)
+                                        }
+                                        .padding(vertical = 10.dp, horizontal = 4.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    AsyncImage(
+                                        model = app.icon,
+                                        contentDescription = app.label,
+                                        modifier = Modifier.size(36.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(app.label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                                        Text(app.packageName, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    }
+                                }
+                                HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                            }
+                        }
+                    } else {
+                        if (filteredIntents.isEmpty()) {
+                            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                                Text("אין פקודות מערכת שמורות", style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        } else {
+                            LazyColumn(modifier = Modifier.fillMaxSize()) {
+                                items(filteredIntents) { savedIntent ->
+                                    val intentUri = savedIntent.toUri(Intent.URI_INTENT_SCHEME)
+                                    val label = savedIntent.getStringExtra("PINAPP_INTENT_LABEL") ?: "בקשת מערכת"
+                                    Row(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .clickable {
+                                                onActionSelected(intentUri)
+                                            }
+                                            .padding(vertical = 12.dp, horizontal = 4.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(36.dp)
+                                                .background(MaterialTheme.colorScheme.tertiaryContainer, CircleShape),
+                                            contentAlignment = Alignment.Center
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Send,
+                                                contentDescription = null,
+                                                tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                                modifier = Modifier.size(16.dp)
+                                            )
+                                        }
+                                        Spacer(modifier = Modifier.width(12.dp))
+                                        Column(modifier = Modifier.weight(1f)) {
+                                            Text(label, style = MaterialTheme.typography.bodyMedium, fontWeight = FontWeight.Bold)
+                                            Text(intentUri, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                        }
+                                    }
+                                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f))
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("ביטול")
+            }
+        }
+    )
+}
+
+@Composable
+fun ShortcutDesignerDialogForSequence(
+    sequenceId: String,
+    apps: List<AppInfo>,
+    savedIntentsList: List<Intent>,
+    onDismiss: () -> Unit,
+    onShortcutCreated: () -> Unit
+) {
+    val context = LocalContext.current
+    var label by remember { mutableStateOf("סבב פעולות") }
+    val isDevMode = remember { NotificationHelper.isDevModeEnabled(context) }
+    var showDevEditDialog by remember { mutableStateOf(false) }
+    var devEditUri by remember { mutableStateOf("") }
+    var pendingBitmap by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
+    var selectedColor by remember { mutableStateOf(0xFFE91E63.toInt()) } // Pink default for sequences
+    var selectedShape by remember { mutableStateOf("circle") } // circle, squircle, square
+    var selectedEmoji by remember { mutableStateOf("🔄") }
+    var iconSource by remember { mutableStateOf("emoji") } // "emoji", "custom_image"
+    
+    var customImageUri by remember { mutableStateOf<Uri?>(null) }
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        if (uri != null) {
+            customImageUri = uri
+            iconSource = "custom_image"
+        }
+    }
+    
+    var sequenceList by remember { mutableStateOf(NotificationHelper.getSequenceForId(context, sequenceId)) }
+    var showActionPicker by remember { mutableStateOf(false) }
+    
+    val colors = listOf(
+        0xFFE91E63.toInt(), // Pink
+        0xFF9C27B0.toInt(), // Purple
+        0xFF673AB7.toInt(), // Deep Purple
+        0xFF3F51B5.toInt(), // Indigo
+        0xFF2196F3.toInt(), // Blue
+        0xFF00BCD4.toInt(), // Cyan
+        0xFF009688.toInt(), // Teal
+        0xFF4CAF50.toInt(), // Green
+        0xFFFF9800.toInt(), // Orange
+        0xFFF44336.toInt()  // Red
+    )
+
+    val emojis = listOf("🔄", "🔁", "⚡", "📱", "🚀", "🔥", "🌟", "⚙️", "🔔", "✉️", "🏠", "🎮", "🎵", "❤️")
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("עיצוב אייקון לסבב פעולות") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                // Label TextField
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    label = { Text("שם קיצור הדרך במסך הבית") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                // Visual Preview Card
+                Text("תצוגה מקדימה של האייקון:", style = MaterialTheme.typography.titleSmall)
+                Box(
+                    modifier = Modifier.fillMaxWidth(),
+                    contentAlignment = Alignment.Center
+                ) {
+                    val shape = when (selectedShape) {
+                        "circle" -> CircleShape
+                        "squircle" -> RoundedCornerShape(24.dp)
+                        else -> RoundedCornerShape(12.dp)
+                    }
+                    Box(
+                        modifier = Modifier
+                            .size(72.dp)
+                            .clip(shape)
+                            .background(
+                                color = Color(selectedColor),
+                                shape = shape
+                            )
+                            .border(
+                                width = 1.dp,
+                                color = MaterialTheme.colorScheme.outline.copy(alpha = 0.2f),
+                                shape = shape
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        when (iconSource) {
+                            "emoji" -> {
+                                Text(text = selectedEmoji, fontSize = 36.sp)
+                            }
+                            "custom_image" -> {
+                                if (customImageUri != null) {
+                                    AsyncImage(
+                                        model = customImageUri,
+                                        contentDescription = null,
+                                        modifier = Modifier.fillMaxSize(),
+                                        contentScale = androidx.compose.ui.layout.ContentScale.Crop
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Add,
+                                        contentDescription = "בחר תמונה",
+                                        tint = MaterialTheme.colorScheme.onSecondaryContainer
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Background Shape
+                Text("בחר צורה:", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    listOf(
+                        "circle" to "עיגול",
+                        "squircle" to "ריבוע מעוגל",
+                        "square" to "ריבוע"
+                    ).forEach { (shape, name) ->
+                        val isSelected = selectedShape == shape
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { selectedShape = shape },
+                            label = { Text(name) }
+                        )
+                    }
+                }
+
+                // Background Color Selector
+                Text("בחר צבע רקע:", style = MaterialTheme.typography.titleSmall)
+                LazyRow(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(colors) { colorValue ->
+                        val isSelected = selectedColor == colorValue
+                        Box(
+                            modifier = Modifier
+                                .size(36.dp)
+                                .background(Color(colorValue), CircleShape)
+                                .border(
+                                    width = if (isSelected) 3.dp else 1.dp,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                    shape = CircleShape
+                                )
+                                .clickable { selectedColor = colorValue }
+                        )
+                    }
+                }
+
+                // Icon Source selector
+                Text("מקור האייקון:", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    listOf(
+                        "emoji" to "אימוג'י",
+                        "custom_image" to "גלריה"
+                    ).forEach { (src, name) ->
+                        FilterChip(
+                            selected = iconSource == src,
+                            onClick = {
+                                if (src == "custom_image" && customImageUri == null) {
+                                    imagePickerLauncher.launch("image/*")
+                                } else {
+                                    iconSource = src
+                                }
+                            },
+                            label = { Text(name) },
+                            modifier = Modifier.weight(1f)
+                        )
+                    }
+                }
+
+                if (iconSource == "custom_image") {
+                    Button(
+                        onClick = { imagePickerLauncher.launch("image/*") },
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                            contentColor = MaterialTheme.colorScheme.onSecondaryContainer
+                        )
+                    ) {
+                        Icon(Icons.Default.Edit, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("בחר תמונה אחרת מהגלריה")
+                    }
+                }
+
+                if (iconSource == "emoji") {
+                    // Emoji Selector
+                    Text("בחר אימוג'י:", style = MaterialTheme.typography.titleSmall)
+                    LazyRow(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        contentPadding = PaddingValues(vertical = 4.dp)
+                    ) {
+                        items(emojis) { emoji ->
+                            val isSelected = selectedEmoji == emoji
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .background(
+                                        if (isSelected) MaterialTheme.colorScheme.secondaryContainer 
+                                        else Color.Transparent, 
+                                        RoundedCornerShape(8.dp)
+                                    )
+                                    .clickable { selectedEmoji = emoji },
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(text = emoji, fontSize = 24.sp)
+                            }
+                        }
+                    }
+                }
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+
+                // --- ACTIONS LIST SECTION ---
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "פעולות בסבב זה:",
+                        style = MaterialTheme.typography.titleSmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    
+                    Button(
+                        onClick = { showActionPicker = true },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = MaterialTheme.colorScheme.primary
+                        ),
+                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp)
+                    ) {
+                        Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("הוסף פעולה", style = MaterialTheme.typography.labelMedium)
+                    }
+                }
+
+                if (sequenceList.isEmpty()) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f), RoundedCornerShape(8.dp))
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(8.dp))
+                            .padding(16.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Text(
+                            text = "הסבב ריק. הוסף אפליקציות או פקודות מערכת.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                } else {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
+                            .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f), RoundedCornerShape(12.dp))
+                            .padding(6.dp),
+                        verticalArrangement = Arrangement.spacedBy(6.dp)
+                    ) {
+                        sequenceList.forEachIndexed { index, target ->
+                            val actionLabel = resolveTargetLabel(context, target)
+                            val actionIcon = resolveTargetIcon(context, target)
+
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.2f), RoundedCornerShape(8.dp))
+                                    .padding(6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                // Step Indicator
+                                Box(
+                                    modifier = Modifier
+                                        .size(24.dp)
+                                        .background(MaterialTheme.colorScheme.primaryContainer, CircleShape),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = (index + 1).toString(),
+                                        style = MaterialTheme.typography.bodySmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.onPrimaryContainer
+                                    )
+                                }
+                                Spacer(modifier = Modifier.width(8.dp))
+
+                                if (actionIcon != null) {
+                                    AsyncImage(
+                                        model = actionIcon,
+                                        contentDescription = actionLabel,
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(24.dp)
+                                            .background(MaterialTheme.colorScheme.tertiaryContainer, CircleShape),
+                                        contentAlignment = Alignment.Center
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Send,
+                                            contentDescription = null,
+                                            tint = MaterialTheme.colorScheme.onTertiaryContainer,
+                                            modifier = Modifier.size(12.dp)
+                                        )
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.width(8.dp))
+
+                                Column(modifier = Modifier.weight(1f)) {
+                                    Text(
+                                        text = actionLabel,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        color = MaterialTheme.colorScheme.onSurface,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
+                                    )
+                                }
+
+                                // Reordering and Delete Buttons
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    IconButton(
+                                        onClick = {
+                                            NotificationHelper.moveSequenceTargetForId(context, sequenceId, index, true)
+                                            sequenceList = NotificationHelper.getSequenceForId(context, sequenceId)
+                                        },
+                                        enabled = index > 0,
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.KeyboardArrowUp,
+                                            contentDescription = "למעלה",
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            NotificationHelper.moveSequenceTargetForId(context, sequenceId, index, false)
+                                            sequenceList = NotificationHelper.getSequenceForId(context, sequenceId)
+                                        },
+                                        enabled = index < sequenceList.size - 1,
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.KeyboardArrowDown,
+                                            contentDescription = "למטה",
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                    IconButton(
+                                        onClick = {
+                                            NotificationHelper.removeSequenceTargetAtForId(context, sequenceId, index)
+                                            sequenceList = NotificationHelper.getSequenceForId(context, sequenceId)
+                                        },
+                                        modifier = Modifier.size(24.dp)
+                                    ) {
+                                        Icon(
+                                            imageVector = Icons.Default.Delete,
+                                            contentDescription = "מחק",
+                                            tint = MaterialTheme.colorScheme.error,
+                                            modifier = Modifier.size(16.dp)
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (label.isBlank()) {
+                        android.widget.Toast.makeText(context, "נא להזין שם לקיצור הדרך", android.widget.Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+                    if (sequenceList.isEmpty()) {
+                        android.widget.Toast.makeText(context, "נא להוסיף לפחות פעולה אחת לסבב", android.widget.Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+
+                    val bitmap = when (iconSource) {
+                        "emoji" -> {
+                            ShortcutHelper.generateEmojiIcon(
+                                context,
+                                selectedEmoji,
+                                selectedColor,
+                                selectedShape
+                            )
+                        }
+                        "custom_image" -> {
+                            if (customImageUri != null) {
+                                ShortcutHelper.generateCustomImageIcon(
+                                    context,
+                                    customImageUri!!,
+                                    selectedColor,
+                                    selectedShape
+                                )
+                            } else {
+                                android.widget.Toast.makeText(context, "נא לבחור תמונה מהגלריה", android.widget.Toast.LENGTH_SHORT).show()
+                                return@Button
+                            }
+                        }
+                        else -> null
+                    }
+
+                    val intent = Intent().apply {
+                        setClassName(context.packageName, "com.example.ActionActivity")
+                        action = "com.example.action.RUN_SEQUENCE"
+                        data = android.net.Uri.parse("sequence://run?id=$sequenceId")
+                        putExtra("sequence_id", sequenceId)
+                    }
+                    val intentUri = intent.toUri(Intent.URI_INTENT_SCHEME)
+
+                    if (isDevMode) {
+                        pendingBitmap = bitmap
+                        devEditUri = intentUri
+                        showDevEditDialog = true
+                    } else {
+                        val success = ShortcutHelper.createShortcut(
+                            context = context,
+                            label = label,
+                            packageName = null,
+                            className = null,
+                            customIcon = bitmap,
+                            intentUri = intentUri
+                        )
+
+                        if (success) {
+                            android.widget.Toast.makeText(context, "קיצור הדרך לסבב הפעולות נוצר בהצלחה!", android.widget.Toast.LENGTH_SHORT).show()
+                            onShortcutCreated()
+                        } else {
+                            android.widget.Toast.makeText(context, "שגיאה ביצירת קיצור הדרך", android.widget.Toast.LENGTH_SHORT).show()
+                        }
+                    }
+                }
+            ) {
+                Text("ייצר קיצור דרך")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("ביטול")
+            }
+        }
+    )
+
+    if (showActionPicker) {
+        SequenceActionPickerDialog(
+            apps = apps,
+            savedIntentsList = savedIntentsList,
+            onDismiss = { showActionPicker = false },
+            onActionSelected = { target ->
+                NotificationHelper.addSequenceTargetForId(context, sequenceId, target)
+                sequenceList = NotificationHelper.getSequenceForId(context, sequenceId)
+                showActionPicker = false
+            }
+        )
+    }
+
+    if (showDevEditDialog) {
+        DeveloperIntentEditDialog(
+            initialIntentUri = devEditUri,
+            onDismiss = { showDevEditDialog = false },
+            onConfirm = { editedUri ->
+                showDevEditDialog = false
+                val success = ShortcutHelper.createShortcut(
+                    context = context,
+                    label = label,
+                    packageName = null,
+                    className = null,
+                    customIcon = pendingBitmap,
+                    intentUri = editedUri
+                )
+                if (success) {
+                    android.widget.Toast.makeText(context, "קיצור הדרך לסבב הפעולות נוצר בהצלחה!", android.widget.Toast.LENGTH_SHORT).show()
+                    onShortcutCreated()
+                } else {
+                    android.widget.Toast.makeText(context, "שגיאה ביצירת קיצור הדרך", android.widget.Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+    }
+}
+
+@Composable
+fun IntentCreatorDialog(
+    onDismiss: () -> Unit,
+    onSaved: () -> Unit
+) {
+    val context = LocalContext.current
+    var label by remember { mutableStateOf("") }
+    var presetType by remember { mutableStateOf("call") } // call, dial, sms, web, alarm, map, settings, custom
+    
+    // Call/Dial/SMS parameters
+    var phoneNumber by remember { mutableStateOf("") }
+    
+    // SMS parameter
+    var smsBody by remember { mutableStateOf("") }
+    
+    // Web parameter
+    var webUrl by remember { mutableStateOf("") }
+    
+    // Alarm parameters
+    var alarmHour by remember { mutableStateOf("8") }
+    var alarmMinute by remember { mutableStateOf("0") }
+    
+    // Map parameter
+    var mapQuery by remember { mutableStateOf("") }
+    
+    // Custom parameters
+    var customAction by remember { mutableStateOf("android.intent.action.VIEW") }
+    var customData by remember { mutableStateOf("") }
+    var customPackage by remember { mutableStateOf("") }
+    var customClass by remember { mutableStateOf("") }
+    
+    // Raw Intent URI parameters
+    var rawUriString by remember { mutableStateOf("") }
+    
+    // Literal action parameters
+    var literalActionString by remember { mutableStateOf("") }
+    
+    var callPermissionGranted by remember {
+        mutableStateOf(
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                context.checkSelfPermission(Manifest.permission.CALL_PHONE) == PackageManager.PERMISSION_GRANTED
+            } else {
+                true
+            }
+        )
+    }
+
+    val permissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        callPermissionGranted = isGranted
+        if (isGranted) {
+            android.widget.Toast.makeText(context, "הרשאת שיחות טלפון אושרה!", android.widget.Toast.LENGTH_SHORT).show()
+        } else {
+            android.widget.Toast.makeText(context, "הרשאת שיחות טלפון נדחתה. לא ניתן יהיה לבצע שיחות ישירות.", android.widget.Toast.LENGTH_LONG).show()
+        }
+    }
+    
+    val presets = listOf(
+        Triple("call", "שיחה ישירה", Icons.Default.Phone),
+        Triple("dial", "חיוג למספר", Icons.Default.Phone),
+        Triple("sms", "שליחת SMS", Icons.Default.Send),
+        Triple("web", "אתר אינטרנט", Icons.Default.Search),
+        Triple("alarm", "שעון מעורר", Icons.Default.Star),
+        Triple("map", "ניווט ומפות", Icons.Default.Home),
+        Triple("settings", "הגדרות מכשיר", Icons.Default.Settings),
+        Triple("wifi_toggle", "שנה מצב Wi-Fi", Icons.Default.Settings),
+        Triple("wifi_on", "הדלק Wi-Fi", Icons.Default.Settings),
+        Triple("wifi_off", "כבה Wi-Fi", Icons.Default.Settings),
+        Triple("bt_toggle", "שנה מצב Bluetooth", Icons.Default.Settings),
+        Triple("bt_on", "הדלק Bluetooth", Icons.Default.Settings),
+        Triple("bt_off", "כבה Bluetooth", Icons.Default.Settings),
+        Triple("bright_max", "בהירות למקסימום (100%)", Icons.Default.Settings),
+        Triple("bright_min", "בהירות למינימום (10%)", Icons.Default.Settings),
+        Triple("bright_half", "בהירות לבינוני (50%)", Icons.Default.Settings),
+        Triple("timeout_30s", "זמן כיבוי מסך ל-30 שניות", Icons.Default.Settings),
+        Triple("timeout_5m", "זמן כיבוי מסך ל-5 דקות", Icons.Default.Settings),
+        Triple("rotate_toggle", "שנה מצב סיבוב מסך אוטומטי", Icons.Default.Settings),
+        Triple("custom", "מותאם אישית", Icons.Default.Settings),
+        Triple("raw", "כתיבה חופשית", Icons.Default.Edit),
+        Triple("literal_action", "פקודה ישירה (עצמאית)", Icons.Default.PlayArrow)
+    )
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("צור בקשת מערכת (Intent) חדשה") },
+        text = {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                // Label TextField
+                OutlinedTextField(
+                    value = label,
+                    onValueChange = { label = it },
+                    label = { Text("שם הבקשה (למשל: התקשר לאמא)") },
+                    modifier = Modifier.fillMaxWidth(),
+                    singleLine = true
+                )
+
+                Text("סוג הפעולה:", style = MaterialTheme.typography.titleSmall)
+                LazyRow(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    contentPadding = PaddingValues(vertical = 4.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    items(presets) { preset ->
+                        val isSelected = presetType == preset.first
+                        FilterChip(
+                            selected = isSelected,
+                            onClick = { 
+                                presetType = preset.first 
+                                if (label.isBlank()) {
+                                    label = preset.second
+                                }
+                            },
+                            label = { Text(preset.second) },
+                            leadingIcon = { Icon(preset.third, contentDescription = null, modifier = Modifier.size(16.dp)) }
+                        )
+                    }
+                }
+
+                Spacer(modifier = Modifier.height(4.dp))
+  
+                when (presetType) {
+                    "call", "dial" -> {
+                        OutlinedTextField(
+                            value = phoneNumber,
+                            onValueChange = { phoneNumber = it },
+                            label = { Text("מספר טלפון") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        
+                        if (presetType == "call") {
+                            Spacer(modifier = Modifier.height(8.dp))
+                            if (!callPermissionGranted) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.5f), RoundedCornerShape(8.dp))
+                                        .padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Default.Warning, contentDescription = null, tint = MaterialTheme.colorScheme.error)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text("שימוש בשיחה ישירה דורש הרשאה.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onErrorContainer)
+                                        TextButton(onClick = { permissionLauncher.launch(Manifest.permission.CALL_PHONE) }) {
+                                            Text("הענק הרשאה", style = MaterialTheme.typography.bodySmall)
+                                        }
+                                    }
+                                }
+                            } else {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.35f), RoundedCornerShape(8.dp))
+                                        .padding(8.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Icon(Icons.Default.Check, contentDescription = null, tint = MaterialTheme.colorScheme.primary)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text("הרשאת שיחות טלפון מאושרת!", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onPrimaryContainer)
+                                }
+                            }
+                        }
+                    }
+                    "sms" -> {
+                        OutlinedTextField(
+                            value = phoneNumber,
+                            onValueChange = { phoneNumber = it },
+                            label = { Text("מספר נמען (אופציונלי)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = smsBody,
+                            onValueChange = { smsBody = it },
+                            label = { Text("תוכן ההודעה") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                    "web" -> {
+                        OutlinedTextField(
+                            value = webUrl,
+                            onValueChange = { webUrl = it },
+                            label = { Text("כתובת האתר (URL)") },
+                            placeholder = { Text("https://example.com") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                    "alarm" -> {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedTextField(
+                                value = alarmHour,
+                                onValueChange = { alarmHour = it },
+                                label = { Text("שעה (0-23)") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                            OutlinedTextField(
+                                value = alarmMinute,
+                                onValueChange = { alarmMinute = it },
+                                label = { Text("דקה (0-59)") },
+                                modifier = Modifier.weight(1f),
+                                singleLine = true
+                            )
+                        }
+                    }
+                    "map" -> {
+                        OutlinedTextField(
+                            value = mapQuery,
+                            onValueChange = { mapQuery = it },
+                            label = { Text("כתובת או יעד לניווט") },
+                            placeholder = { Text("למשל: תל אביב") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                    "wifi_toggle", "wifi_on", "wifi_off" -> {
+                        Text(
+                            text = "פעולה זו תשלוט בקישוריות ה-Wi-Fi במכשיר שלך.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    "bt_toggle", "bt_on", "bt_off" -> {
+                        Text(
+                            text = "פעולה זו תשלוט בקישוריות ה-Bluetooth במכשיר שלך.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    "bright_max", "bright_min", "bright_half" -> {
+                        Text(
+                            text = "פעולה זו תשנה את בהירות המסך במכשיר שלך (דורש הרשאת שינוי הגדרות מערכת).",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    "timeout_30s", "timeout_5m" -> {
+                        Text(
+                            text = "פעולה זו תשנה את זמן כיבוי המסך האוטומטי (דורש הרשאת שינוי הגדרות מערכת).",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    "rotate_toggle" -> {
+                        Text(
+                            text = "פעולה זו תשנה את מצב סיבוב המסך האוטומטי (דורש הרשאת שינוי הגדרות מערכת).",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    "custom" -> {
+                        OutlinedTextField(
+                            value = customAction,
+                            onValueChange = { customAction = it },
+                            label = { Text("Intent Action") },
+                            placeholder = { Text("android.intent.action.VIEW") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = customData,
+                            onValueChange = { customData = it },
+                            label = { Text("Data URI (אופציונלי)") },
+                            placeholder = { Text("tel:12345") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = customPackage,
+                            onValueChange = { customPackage = it },
+                            label = { Text("Package Name (אופציונלי)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = customClass,
+                            onValueChange = { customClass = it },
+                            label = { Text("Class Name (אופציונלי)") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                    }
+                    "raw" -> {
+                        OutlinedTextField(
+                            value = rawUriString,
+                            onValueChange = { rawUriString = it },
+                            label = { Text("הזן Intent URI או קישור (URL / URI)") },
+                            placeholder = { Text("intent:#Intent;action=android.settings.SETTINGS;end") },
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "תוכל להזין פורמט Android Intent URI מלא, או קישור URI חופשי. דוגמאות:\n" +
+                                   "• לפתיחת הגדרות: intent:#Intent;action=android.settings.SETTINGS;end\n" +
+                                   "• לפתיחת אתר: https://google.com\n" +
+                                   "• חיוג מהיר: tel:0501234567",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    "literal_action" -> {
+                        OutlinedTextField(
+                            value = literalActionString,
+                            onValueChange = { literalActionString = it },
+                            label = { Text("הזן פקודה מלאה (Action)") },
+                            placeholder = { Text("למשל: android.intent.action.VIEW או ACTION_SET_ALARM") },
+                            modifier = Modifier.fillMaxWidth(),
+                            singleLine = true
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        Text(
+                            text = "הזן את הפקודה/הפעולה (Action) המלאה בדיוק כפי שהיא צריכה להישלח למערכת. האפליקציה תשתמש בה ישירות ללא שינויים או תוספות, כולל מילים כמו action, active או כל פקודה מותאמת אישית אחרת שתבחר.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    if (label.isBlank()) {
+                        android.widget.Toast.makeText(context, "נא להזין שם לבקשת המערכת", android.widget.Toast.LENGTH_SHORT).show()
+                        return@Button
+                    }
+
+                    val finalIntent = Intent()
+                    finalIntent.putExtra("PINAPP_INTENT_LABEL", label)
+                    
+                    try {
+                        when (presetType) {
+                            "call" -> {
+                                if (!callPermissionGranted) {
+                                    android.widget.Toast.makeText(context, "נא להעניק הרשאת שיחות טלפון תחילה", android.widget.Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                                finalIntent.action = Intent.ACTION_CALL
+                                finalIntent.data = android.net.Uri.parse("tel:$phoneNumber")
+                            }
+                            "dial" -> {
+                                finalIntent.action = Intent.ACTION_DIAL
+                                finalIntent.data = android.net.Uri.parse("tel:$phoneNumber")
+                            }
+                            "sms" -> {
+                                finalIntent.action = Intent.ACTION_SENDTO
+                                finalIntent.data = android.net.Uri.parse("smsto:$phoneNumber")
+                                if (smsBody.isNotEmpty()) {
+                                    finalIntent.putExtra("sms_body", smsBody)
+                                }
+                            }
+                            "web" -> {
+                                var url = webUrl
+                                if (url.isNotBlank()) {
+                                    if (!url.startsWith("http://") && !url.startsWith("https://")) {
+                                        url = "https://$url"
+                                    }
+                                    finalIntent.action = Intent.ACTION_VIEW
+                                    finalIntent.data = android.net.Uri.parse(url)
+                                } else {
+                                    android.widget.Toast.makeText(context, "נא להזין כתובת אתר", android.widget.Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                            }
+                            "alarm" -> {
+                                finalIntent.action = android.provider.AlarmClock.ACTION_SET_ALARM
+                                val h = alarmHour.toIntOrNull() ?: 8
+                                val m = alarmMinute.toIntOrNull() ?: 0
+                                finalIntent.putExtra(android.provider.AlarmClock.EXTRA_HOUR, h)
+                                finalIntent.putExtra(android.provider.AlarmClock.EXTRA_MINUTES, m)
+                                finalIntent.putExtra(android.provider.AlarmClock.EXTRA_SKIP_UI, true)
+                            }
+                            "map" -> {
+                                if (mapQuery.isNotBlank()) {
+                                    finalIntent.action = Intent.ACTION_VIEW
+                                    finalIntent.data = android.net.Uri.parse("google.navigation:q=" + android.net.Uri.encode(mapQuery))
+                                } else {
+                                    android.widget.Toast.makeText(context, "נא להזין יעד לניווט", android.widget.Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                            }
+                             "settings" -> {
+                                finalIntent.action = android.provider.Settings.ACTION_SETTINGS
+                            }
+                            "wifi_toggle" -> {
+                                finalIntent.action = "com.example.action.TOGGLE_WIFI"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "wifi_on" -> {
+                                finalIntent.action = "com.example.action.WIFI_ON"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "wifi_off" -> {
+                                finalIntent.action = "com.example.action.WIFI_OFF"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "bt_toggle" -> {
+                                finalIntent.action = "com.example.action.TOGGLE_BLUETOOTH"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "bt_on" -> {
+                                finalIntent.action = "com.example.action.BLUETOOTH_ON"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "bt_off" -> {
+                                finalIntent.action = "com.example.action.BLUETOOTH_OFF"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "bright_max" -> {
+                                finalIntent.action = "com.example.action.SET_BRIGHTNESS_MAX"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "bright_min" -> {
+                                finalIntent.action = "com.example.action.SET_BRIGHTNESS_MIN"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "bright_half" -> {
+                                finalIntent.action = "com.example.action.SET_BRIGHTNESS_HALF"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "timeout_30s" -> {
+                                finalIntent.action = "com.example.action.SET_TIMEOUT_30S"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "timeout_5m" -> {
+                                finalIntent.action = "com.example.action.SET_TIMEOUT_5M"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "rotate_toggle" -> {
+                                finalIntent.action = "com.example.action.TOGGLE_ROTATION"
+                                finalIntent.setClassName(context.packageName, "com.example.ActionActivity")
+                            }
+                            "custom" -> {
+                                if (customAction.isBlank()) {
+                                    android.widget.Toast.makeText(context, "Intent Action לא יכול להיות ריק", android.widget.Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                                finalIntent.action = customAction
+                                if (customData.isNotEmpty()) {
+                                    finalIntent.data = android.net.Uri.parse(customData)
+                                }
+                                if (customPackage.isNotEmpty()) {
+                                    if (customClass.isNotEmpty()) {
+                                        finalIntent.setClassName(customPackage, customClass)
+                                    } else {
+                                        finalIntent.setPackage(customPackage)
+                                    }
+                                }
+                            }
+                            "literal_action" -> {
+                                if (literalActionString.isBlank()) {
+                                    android.widget.Toast.makeText(context, "נא להזין פקודה (Action)", android.widget.Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                                finalIntent.action = literalActionString.trim()
+                            }
+                            "raw" -> {
+                                if (rawUriString.isBlank()) {
+                                    android.widget.Toast.makeText(context, "נא להזין Intent URI", android.widget.Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                                val input = rawUriString.trim()
+                                val parsed = try {
+                                    if (input.startsWith("intent:")) {
+                                        Intent.parseUri(input, Intent.URI_INTENT_SCHEME)
+                                    } else if (input.startsWith("http://") || input.startsWith("https://")) {
+                                        Intent(Intent.ACTION_VIEW, android.net.Uri.parse(input))
+                                    } else if (input.startsWith("tel:")) {
+                                        Intent(Intent.ACTION_DIAL, android.net.Uri.parse(input))
+                                    } else if (input.startsWith("geo:") || input.startsWith("mailto:") || input.startsWith("sms:")) {
+                                        Intent(Intent.ACTION_VIEW, android.net.Uri.parse(input))
+                                    } else if (input.contains("/") && !input.contains(":") && !input.contains(" ")) {
+                                        val parts = input.split("/")
+                                        if (parts.size == 2) {
+                                            Intent(Intent.ACTION_MAIN).apply {
+                                                setClassName(parts[0], parts[1])
+                                            }
+                                        } else {
+                                            null
+                                        }
+                                    } else if (input.contains(".") && !input.contains(" ") && !input.contains(":") && !input.contains("/")) {
+                                        if (input.startsWith("android.intent.action.") || input.startsWith("android.settings.") || input.contains(".action.")) {
+                                            Intent(input)
+                                        } else {
+                                            val launchIntent = context.packageManager.getLaunchIntentForPackage(input)
+                                            launchIntent ?: Intent(input)
+                                        }
+                                    } else {
+                                        if (!input.contains(" ") && !input.contains(":") && !input.contains("/")) {
+                                            Intent(input)
+                                        } else {
+                                            Intent(Intent.ACTION_VIEW, android.net.Uri.parse(input))
+                                        }
+                                    }
+                                } catch (e: Exception) {
+                                    null
+                                }
+                                if (parsed == null) {
+                                    android.widget.Toast.makeText(context, "פורמט ה-URI אינו תקין", android.widget.Toast.LENGTH_SHORT).show()
+                                    return@Button
+                                }
+                                parsed.putExtra("PINAPP_INTENT_LABEL", label)
+                                NotificationHelper.saveIntent(context, parsed)
+                                onSaved()
+                                return@Button
+                            }
+                        }
+                    } catch (e: Exception) {
+                        android.widget.Toast.makeText(context, "שגיאה ביצירת ה-Intent: ${e.message}", android.widget.Toast.LENGTH_LONG).show()
+                        return@Button
+                    }
+                    
+                    NotificationHelper.saveIntent(context, finalIntent)
+                    onSaved()
+                }
+            ) {
+                Text("שמור")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("ביטול")
+            }
+        }
+    )
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun StatusBarIconConverterDialog(
+    selectedUri: Uri,
+    onDismiss: () -> Unit,
+    onIconProcessed: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var conversionMode by remember { mutableStateOf("PRESERVE_ALPHA") }
+    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var isProcessing by remember { mutableStateOf(true) }
+
+    LaunchedEffect(selectedUri, conversionMode) {
+        isProcessing = true
+        val processed = withContext(Dispatchers.IO) {
+            try {
+                val resolver = context.contentResolver
+                val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val source = ImageDecoder.createSource(resolver, selectedUri)
+                    ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+                        decoder.isMutableRequired = true
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    val b = MediaStore.Images.Media.getBitmap(resolver, selectedUri)
+                    b.copy(Bitmap.Config.ARGB_8888, true)
+                }
+
+                val size = 96
+                val scaledBitmap = Bitmap.createScaledBitmap(bitmap, size, size, true)
+                val outputBitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(outputBitmap)
+
+                when (conversionMode) {
+                    "PRESERVE_ALPHA" -> {
+                        for (x in 0 until size) {
+                            for (y in 0 until size) {
+                                val pixel = scaledBitmap.getPixel(x, y)
+                                val alpha = android.graphics.Color.alpha(pixel)
+                                if (alpha > 10) {
+                                    outputBitmap.setPixel(x, y, android.graphics.Color.argb(alpha, 255, 255, 255))
+                                } else {
+                                    outputBitmap.setPixel(x, y, android.graphics.Color.TRANSPARENT)
+                                }
+                            }
+                        }
+                    }
+                    "DARK_TO_ALPHA" -> {
+                        for (x in 0 until size) {
+                            for (y in 0 until size) {
+                                val pixel = scaledBitmap.getPixel(x, y)
+                                val r = android.graphics.Color.red(pixel)
+                                val g = android.graphics.Color.green(pixel)
+                                val b = android.graphics.Color.blue(pixel)
+                                val originalAlpha = android.graphics.Color.alpha(pixel)
+                                
+                                val luminance = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+                                val finalAlpha = (luminance * (originalAlpha / 255f)).toInt()
+                                outputBitmap.setPixel(x, y, android.graphics.Color.argb(finalAlpha, 255, 255, 255))
+                            }
+                        }
+                    }
+                    "LIGHT_TO_ALPHA" -> {
+                        for (x in 0 until size) {
+                            for (y in 0 until size) {
+                                val pixel = scaledBitmap.getPixel(x, y)
+                                val r = android.graphics.Color.red(pixel)
+                                val g = android.graphics.Color.green(pixel)
+                                val b = android.graphics.Color.blue(pixel)
+                                val originalAlpha = android.graphics.Color.alpha(pixel)
+                                
+                                val luminance = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+                                val invertedLuminance = 255 - luminance
+                                val finalAlpha = (invertedLuminance * (originalAlpha / 255f)).toInt()
+                                outputBitmap.setPixel(x, y, android.graphics.Color.argb(finalAlpha, 255, 255, 255))
+                            }
+                        }
+                    }
+                    else -> {
+                        canvas.drawBitmap(scaledBitmap, 0f, 0f, null)
+                    }
+                }
+                outputBitmap
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
+            }
+        }
+        previewBitmap = processed
+        isProcessing = false
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "המרת תמונה לסמל סטטוס בר",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Right
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text = "בחר את שיטת ההמרה המתאימה ביותר כדי שהסמל ייראה מעולה בסטטוס בר העליון (רקע שקוף וסמל לבן):",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Right,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Options selector
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val modes = listOf(
+                        Triple("PRESERVE_ALPHA", "שימור שקיפות (PNG)", "מתאים לתמונות עם רקע שקוף מראש"),
+                        Triple("LIGHT_TO_ALPHA", "הסרת רקע בהיר (לסמלים כהים)", "הופך צבעים בהירים לשקופים וכהים ללבן"),
+                        Triple("DARK_TO_ALPHA", "הסרת רקע כהה (לסמלים בהירים)", "הופך צבעים כהים לשקופים ובהירים ללבן"),
+                        Triple("ORIGINAL", "צבעוני מקורי", "ללא המרה - מציג את התמונה בצבעיה המקוריים")
+                    )
+
+                    modes.forEach { (mode, title, desc) ->
+                        val isSelected = conversionMode == mode
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { conversionMode = mode },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            ),
+                            border = BorderStroke(
+                                width = if (isSelected) 2.dp else 1.dp,
+                                color = if (isSelected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outlineVariant
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = { conversionMode = mode }
+                                    )
+                                    Text(
+                                        text = title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                        else MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Text(
+                                    text = desc,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 36.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // High-fidelity Preview Section
+                Text(
+                    text = "תצוגה מקדימה בסטטוס בר:",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Right
+                )
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFF1C1C1E))
+                        .border(1.dp, Color(0xFF2C2C2E), RoundedCornerShape(12.dp))
+                        .padding(vertical = 12.dp, horizontal = 16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isProcessing) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    } else {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (previewBitmap != null) {
+                                    androidx.compose.foundation.Image(
+                                        bitmap = previewBitmap!!.asImageBitmap(),
+                                        contentDescription = "תצוגה מקדימה",
+                                        modifier = Modifier.size(22.dp)
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(22.dp)
+                                            .background(Color.White.copy(alpha = 0.2f), shape = CircleShape)
+                                    )
+                                }
+                                Text(
+                                    text = "PINAPP פעיל",
+                                    color = Color.White.copy(alpha = 0.9f),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Refresh,
+                                    contentDescription = null,
+                                    tint = Color.White.copy(alpha = 0.8f),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Icon(
+                                    imageVector = Icons.Default.Settings,
+                                    contentDescription = null,
+                                    tint = Color.White.copy(alpha = 0.8f),
+                                    modifier = Modifier.size(14.dp)
+                                )
+                                Text(
+                                    text = "18:40",
+                                    color = Color.White.copy(alpha = 0.9f),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val savedPath = NotificationHelper.processAndSaveCustomIcon(context, selectedUri, conversionMode)
+                    if (savedPath != null) {
+                        onIconProcessed(savedPath)
+                    } else {
+                        Toast.makeText(context, "שגיאה בעיבוד והמרת התמונה", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                enabled = !isProcessing && previewBitmap != null
+            ) {
+                Text("אשר ושמור סמל")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("ביטול")
+            }
+        }
+    )
+}
+
+@Composable
+fun TileIconConverterDialog(
+    selectedUri: Uri,
+    tileId: Int,
+    onDismiss: () -> Unit,
+    onIconProcessed: (String) -> Unit
+) {
+    val context = LocalContext.current
+    var conversionMode by remember { mutableStateOf("PRESERVE_ALPHA") }
+    var previewBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var isProcessing by remember { mutableStateOf(true) }
+
+    LaunchedEffect(selectedUri, conversionMode) {
+        isProcessing = true
+        val processed = withContext(Dispatchers.IO) {
+            try {
+                val resolver = context.contentResolver
+                val bitmap = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                    val source = ImageDecoder.createSource(resolver, selectedUri)
+                    ImageDecoder.decodeBitmap(source) { decoder, _, _ ->
+                        decoder.isMutableRequired = true
+                    }
+                } else {
+                    @Suppress("DEPRECATION")
+                    val b = MediaStore.Images.Media.getBitmap(resolver, selectedUri)
+                    b.copy(Bitmap.Config.ARGB_8888, true)
+                }
+
+                val size = 96
+                val scaledBitmap = Bitmap.createScaledBitmap(bitmap, size, size, true)
+                val outputBitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888)
+                val canvas = Canvas(outputBitmap)
+
+                when (conversionMode) {
+                    "PRESERVE_ALPHA" -> {
+                        for (x in 0 until size) {
+                            for (y in 0 until size) {
+                                val pixel = scaledBitmap.getPixel(x, y)
+                                val alpha = android.graphics.Color.alpha(pixel)
+                                if (alpha > 10) {
+                                    outputBitmap.setPixel(x, y, android.graphics.Color.argb(alpha, 255, 255, 255))
+                                } else {
+                                    outputBitmap.setPixel(x, y, android.graphics.Color.TRANSPARENT)
+                                }
+                            }
+                        }
+                    }
+                    "DARK_TO_ALPHA" -> {
+                        for (x in 0 until size) {
+                            for (y in 0 until size) {
+                                val pixel = scaledBitmap.getPixel(x, y)
+                                val r = android.graphics.Color.red(pixel)
+                                val g = android.graphics.Color.green(pixel)
+                                val b = android.graphics.Color.blue(pixel)
+                                val originalAlpha = android.graphics.Color.alpha(pixel)
+                                
+                                val luminance = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+                                val finalAlpha = (luminance * (originalAlpha / 255f)).toInt()
+                                outputBitmap.setPixel(x, y, android.graphics.Color.argb(finalAlpha, 255, 255, 255))
+                            }
+                        }
+                    }
+                    "LIGHT_TO_ALPHA" -> {
+                        for (x in 0 until size) {
+                            for (y in 0 until size) {
+                                val pixel = scaledBitmap.getPixel(x, y)
+                                val r = android.graphics.Color.red(pixel)
+                                val g = android.graphics.Color.green(pixel)
+                                val b = android.graphics.Color.blue(pixel)
+                                val originalAlpha = android.graphics.Color.alpha(pixel)
+                                
+                                val luminance = (0.299 * r + 0.587 * g + 0.114 * b).toInt()
+                                val invertedLuminance = 255 - luminance
+                                val finalAlpha = (invertedLuminance * (originalAlpha / 255f)).toInt()
+                                outputBitmap.setPixel(x, y, android.graphics.Color.argb(finalAlpha, 255, 255, 255))
+                            }
+                        }
+                    }
+                    else -> {
+                        canvas.drawBitmap(scaledBitmap, 0f, 0f, null)
+                    }
+                }
+                outputBitmap
+            } catch (e: Exception) {
+                e.printStackTrace()
+                null
+            }
+        }
+        previewBitmap = processed
+        isProcessing = false
+    }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                text = "המרת תמונה לסמל אריח $tileId",
+                style = MaterialTheme.typography.titleMedium,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.fillMaxWidth(),
+                textAlign = androidx.compose.ui.text.style.TextAlign.Right
+            )
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
+            ) {
+                Text(
+                    text = "בחר את שיטת ההמרה המתאימה ביותר כדי שסמל האריח ייראה מעולה בלוח ההתראות המהירות:",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Right,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                // Options selector
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    val modes = listOf(
+                        Triple("PRESERVE_ALPHA", "שימור שקיפות (PNG)", "מתאים לתמונות עם רקע שקוף מראש"),
+                        Triple("LIGHT_TO_ALPHA", "הסרת רקע בהיר (לסמלים כהים)", "הופך צבעים בהירים לשקופים וכהים ללבן"),
+                        Triple("DARK_TO_ALPHA", "הסרת רקע כהה (לסמלים בהירים)", "הופך צבעים כהים לשקופים ובהירים ללבן"),
+                        Triple("ORIGINAL", "צבעוני מקורי", "ללא המרה - מציג את התמונה בצבעיה המקוריים")
+                    )
+
+                    modes.forEach { (mode, title, desc) ->
+                        val isSelected = conversionMode == mode
+                        Card(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { conversionMode = mode },
+                            colors = CardDefaults.cardColors(
+                                containerColor = if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                                else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
+                            ),
+                            border = BorderStroke(
+                                width = if (isSelected) 2.dp else 1.dp,
+                                color = if (isSelected) MaterialTheme.colorScheme.primary
+                                else MaterialTheme.colorScheme.outlineVariant
+                            )
+                        ) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(12.dp)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = { conversionMode = mode }
+                                    )
+                                    Text(
+                                        text = title,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                        else MaterialTheme.colorScheme.onSurface
+                                    )
+                                }
+                                Text(
+                                    text = desc,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                                    else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.padding(start = 36.dp)
+                                )
+                            }
+                        }
+                    }
+                }
+
+                // High-fidelity Preview Section
+                Text(
+                    text = "תצוגה מקדימה של האריח המהיר:",
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.fillMaxWidth(),
+                    textAlign = androidx.compose.ui.text.style.TextAlign.Right
+                )
+
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(12.dp))
+                        .background(Color(0xFF1C1C1E))
+                        .border(1.dp, Color(0xFF2C2C2E), RoundedCornerShape(12.dp))
+                        .padding(vertical = 12.dp, horizontal = 16.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    if (isProcessing) {
+                        CircularProgressIndicator(
+                            color = Color.White,
+                            modifier = Modifier.size(24.dp)
+                        )
+                    } else {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween,
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                            ) {
+                                if (previewBitmap != null) {
+                                    androidx.compose.foundation.Image(
+                                        bitmap = previewBitmap!!.asImageBitmap(),
+                                        contentDescription = "תצוגה מקדימה",
+                                        modifier = Modifier.size(24.dp)
+                                    )
+                                } else {
+                                    Box(
+                                        modifier = Modifier
+                                            .size(24.dp)
+                                            .background(Color.White.copy(alpha = 0.2f), shape = CircleShape)
+                                    )
+                                }
+                                Text(
+                                    text = NotificationHelper.getTileLabel(context, tileId),
+                                    color = Color.White.copy(alpha = 0.9f),
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontSize = 12.sp,
+                                    fontWeight = FontWeight.Medium
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    val savedPath = NotificationHelper.processAndSaveTileIcon(context, selectedUri, conversionMode, tileId)
+                    if (savedPath != null) {
+                        onIconProcessed(savedPath)
+                    } else {
+                        Toast.makeText(context, "שגיאה בעיבוד והמרת התמונה", Toast.LENGTH_SHORT).show()
+                    }
+                },
+                enabled = !isProcessing && previewBitmap != null
+            ) {
+                Text("אשר ושמור סמל")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("ביטול")
+            }
+        }
+    )
+}
+
+@Composable
+fun CategoryHeader(title: String, icon: androidx.compose.ui.graphics.vector.ImageVector) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.primary,
+            modifier = Modifier.size(20.dp)
+        )
+        Spacer(modifier = Modifier.width(8.dp))
+        Text(
+            text = title,
+            style = MaterialTheme.typography.titleMedium,
+            fontWeight = FontWeight.Bold,
+            color = MaterialTheme.colorScheme.primary
+        )
+    }
+    Box(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp)
+            .height(1.dp)
+            .background(MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+    )
+    Spacer(modifier = Modifier.height(8.dp))
+}
+
+@Composable
+fun DynamicQuickSettingsTileManagementCard(
+    context: android.content.Context,
+    tileTargetPkgs: Map<Int, String?>,
+    tileAddedStates: Map<Int, Boolean>,
+    onTileRemove: (Int) -> Unit,
+    onSelectTile: (TriggerType) -> Unit,
+    onAddTileClick: () -> Unit,
+    refreshCounter: Int,
+    onRefreshRequest: () -> Unit,
+    onCustomIconRequest: (Int) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = 16.dp, vertical = 8.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f)
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp)
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth()
+            ) {
+                Icon(
+                    imageVector = Icons.Default.List,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text(
+                    text = "ניהול אריחי סטטוס בר (Quick Tiles)",
+                    style = MaterialTheme.typography.titleMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            Spacer(modifier = Modifier.height(6.dp))
+            Text(
+                text = "הוסף אריחים מותאמים אישית מווילון ההתראות המהירות של המכשיר שלך להפעלת קיצורי הדרך שלך במהירות.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.85f)
+            )
+            Spacer(modifier = Modifier.height(16.dp))
+
+            val totalAdded = tileAddedStates.values.count { it }
+
+            if (totalAdded == 0) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f))
+                        .border(
+                            width = 1.dp,
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                            shape = RoundedCornerShape(8.dp)
+                        )
+                        .padding(24.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Info,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
+                            modifier = Modifier.size(32.dp)
+                        )
+                        Text(
+                            text = "טרם הוספת אריחים מהירים.",
+                            style = MaterialTheme.typography.titleSmall,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Text(
+                            text = "לחץ על כפתור ההוספה למטה כדי להתחיל לעצב ולהגדיר אריח מהיר ראשון!",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                            textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            } else {
+                Column(
+                    verticalArrangement = Arrangement.spacedBy(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    for (tileNum in 1..15) {
+                        if (tileAddedStates[tileNum] == true) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .background(MaterialTheme.colorScheme.surface, RoundedCornerShape(12.dp))
+                                    .border(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.3f), RoundedCornerShape(12.dp))
+                                    .padding(4.dp)
+                            ) {
+                                val type = NotificationHelper.getTileTriggerType(tileNum)!!
+                                val currentLabel = NotificationHelper.getTileLabel(context, tileNum)
+                                TriggerConfigCard(
+                                    title = "אריח מהיר $tileNum: $currentLabel",
+                                    description = "הגדר אילו אפליקציות או פעולות מערכת ירוצו בעת לחיצה על אריח $tileNum.",
+                                    type = type,
+                                    icon = Icons.Default.PlayArrow,
+                                    targetPkg = tileTargetPkgs[tileNum],
+                                    onSelectClick = { onSelectTile(type) },
+                                    onClearClick = {
+                                        NotificationHelper.clearTargetPackage(context, type)
+                                        onRefreshRequest()
+                                    },
+                                    refreshCounter = refreshCounter,
+                                    onRefreshRequest = onRefreshRequest,
+                                    modifier = Modifier.padding(12.dp)
+                                )
+
+                                Spacer(modifier = Modifier.height(8.dp))
+                                androidx.compose.material3.HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 12.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                                )
+                                Spacer(modifier = Modifier.height(12.dp))
+
+                                Column(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 12.dp),
+                                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                                ) {
+                                    Text(
+                                        text = "עריכת מראה האריח (שם וסמל)",
+                                        style = MaterialTheme.typography.titleSmall,
+                                        fontWeight = FontWeight.Bold,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+
+                                    var tileLabelText by remember(tileNum, refreshCounter) {
+                                        mutableStateOf(NotificationHelper.getTileLabel(context, tileNum))
+                                    }
+
+                                    OutlinedTextField(
+                                        value = tileLabelText,
+                                        onValueChange = { tileLabelText = it },
+                                        label = { Text("שם האריח") },
+                                        modifier = Modifier.fillMaxWidth(),
+                                        singleLine = true,
+                                        trailingIcon = {
+                                            IconButton(
+                                                onClick = {
+                                                    NotificationHelper.setTileLabel(context, tileNum, tileLabelText)
+                                                    onRefreshRequest()
+                                                    Toast.makeText(context, "שם האריח $tileNum עודכן!", Toast.LENGTH_SHORT).show()
+                                                }
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Check,
+                                                    contentDescription = "שמור שם",
+                                                    tint = MaterialTheme.colorScheme.primary
+                                                )
+                                            }
+                                        }
+                                    )
+
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "בחירת סמל (אייקון):",
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.onSurface
+                                        )
+                                        Text(
+                                            text = "סמלים מובנים מראש:",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                    }
+
+                                    val tileIconType = NotificationHelper.getTileIconType(context, tileNum)
+                                    val tilePresetIcon = NotificationHelper.getTilePresetIcon(context, tileNum)
+
+                                    val presets = listOf(
+                                        Pair(android.R.drawable.ic_menu_revert, "חץ"),
+                                        Pair(android.R.drawable.ic_menu_compass, "מצפן"),
+                                        Pair(android.R.drawable.ic_menu_mylocation, "מיקום"),
+                                        Pair(android.R.drawable.ic_menu_directions, "ניווט"),
+                                        Pair(android.R.drawable.ic_menu_camera, "מצלמה"),
+                                        Pair(android.R.drawable.ic_menu_manage, "הגדרות"),
+                                        Pair(android.R.drawable.ic_menu_view, "עין"),
+                                        Pair(android.R.drawable.ic_dialog_info, "מידע"),
+                                        Pair(android.R.drawable.star_on, "כוכב"),
+                                        Pair(android.R.drawable.ic_menu_send, "שליחה")
+                                    )
+
+                                    LazyRow(
+                                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                                        modifier = Modifier.fillMaxWidth()
+                                    ) {
+                                        items(presets) { (resId, label) ->
+                                            val isSelected = tileIconType == "preset" && tilePresetIcon == resId
+                                            val iconDrawable = try {
+                                                androidx.core.content.ContextCompat.getDrawable(context, resId)
+                                            } catch (e: Exception) {
+                                                null
+                                            }
+
+                                            Column(
+                                                horizontalAlignment = Alignment.CenterHorizontally,
+                                                modifier = Modifier
+                                                    .clip(RoundedCornerShape(8.dp))
+                                                    .background(
+                                                        if (isSelected) MaterialTheme.colorScheme.primaryContainer
+                                                        else Color.Transparent
+                                                    )
+                                                    .border(
+                                                        width = 1.dp,
+                                                        color = if (isSelected) MaterialTheme.colorScheme.primary
+                                                        else MaterialTheme.colorScheme.outlineVariant,
+                                                        shape = RoundedCornerShape(8.dp)
+                                                    )
+                                                    .clickable {
+                                                        NotificationHelper.setTilePresetIcon(context, tileNum, resId)
+                                                        onRefreshRequest()
+                                                        Toast.makeText(context, "סמל אריח $tileNum עודכן!", Toast.LENGTH_SHORT).show()
+                                                    }
+                                                    .padding(8.dp)
+                                                    .width(54.dp)
+                                            ) {
+                                                Box(
+                                                    modifier = Modifier.size(24.dp),
+                                                    contentAlignment = Alignment.Center
+                                                ) {
+                                                    if (iconDrawable != null) {
+                                                        val bitmap = Bitmap.createBitmap(
+                                                            iconDrawable.intrinsicWidth.coerceAtLeast(48),
+                                                            iconDrawable.intrinsicHeight.coerceAtLeast(48),
+                                                            Bitmap.Config.ARGB_8888
+                                                        )
+                                                        val canvas = Canvas(bitmap)
+                                                        iconDrawable.setBounds(0, 0, canvas.width, canvas.height)
+                                                        iconDrawable.draw(canvas)
+                                                        androidx.compose.foundation.Image(
+                                                            bitmap = bitmap.asImageBitmap(),
+                                                            contentDescription = label,
+                                                            modifier = Modifier.fillMaxSize()
+                                                        )
+                                                    } else {
+                                                        Icon(
+                                                            Icons.Default.Star,
+                                                            contentDescription = label,
+                                                            tint = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                                            else MaterialTheme.colorScheme.onSurface
+                                                        )
+                                                    }
+                                                }
+                                                Spacer(modifier = Modifier.height(4.dp))
+                                                Text(
+                                                    text = label,
+                                                    style = MaterialTheme.typography.bodySmall,
+                                                    fontSize = 10.sp,
+                                                    maxLines = 1,
+                                                    overflow = TextOverflow.Ellipsis,
+                                                    color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer
+                                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                                                )
+                                            }
+                                        }
+                                    }
+
+                                    Column(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalArrangement = Arrangement.spacedBy(8.dp)
+                                    ) {
+                                        Text(
+                                            text = "סמל מותאם מהגלריה:",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        )
+                                        Row(
+                                            modifier = Modifier.fillMaxWidth(),
+                                            verticalAlignment = Alignment.CenterVertically,
+                                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                                        ) {
+                                            Button(
+                                                onClick = { onCustomIconRequest(tileNum) },
+                                                colors = ButtonDefaults.buttonColors(
+                                                    containerColor = MaterialTheme.colorScheme.secondary
+                                                )
+                                            ) {
+                                                Icon(
+                                                    Icons.Default.Edit,
+                                                    contentDescription = null,
+                                                    modifier = Modifier.size(18.dp)
+                                                )
+                                                Spacer(modifier = Modifier.width(6.dp))
+                                                Text("בחר תמונה מהגלריה")
+                                            }
+
+                                            TileCustomIconLoader(
+                                                context = context,
+                                                tileNum = tileNum,
+                                                tileIconType = tileIconType,
+                                                refreshCounter = refreshCounter
+                                            )
+                                        }
+                                    }
+                                }
+
+                                Spacer(modifier = Modifier.height(16.dp))
+                                androidx.compose.material3.HorizontalDivider(
+                                    modifier = Modifier.padding(horizontal = 12.dp),
+                                    color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
+                                )
+                                Spacer(modifier = Modifier.height(8.dp))
+
+                                OutlinedButton(
+                                    onClick = { onTileRemove(tileNum) },
+                                    modifier = Modifier
+                                        .align(Alignment.End)
+                                        .padding(end = 12.dp, bottom = 12.dp),
+                                    colors = ButtonDefaults.outlinedButtonColors(
+                                        contentColor = MaterialTheme.colorScheme.error
+                                    ),
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.error.copy(alpha = 0.5f))
+                                ) {
+                                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("הסר אריח מהיר $tileNum")
+                                }
+                            }
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(16.dp))
+            }
+
+            if (totalAdded < 15) {
+                Button(
+                    onClick = onAddTileClick,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary
+                    )
+                ) {
+                    Icon(Icons.Default.Add, contentDescription = null)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("הוסף אריח מהיר חדש (${15 - totalAdded} נותרו)")
+                }
+            } else {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(8.dp))
+                        .background(MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.4f))
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.secondary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "הגעת להגבלת האריחים הנתמכת במערכת (מקסימום 15 אריחים)",
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSecondaryContainer
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun MenuCard(
+    title: String,
+    description: String,
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    badgeText: String,
+    badgeColor: androidx.compose.ui.graphics.Color,
+    onClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .border(
+                width = 1.dp,
+                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                shape = RoundedCornerShape(12.dp)
+            ),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        shape = RoundedCornerShape(12.dp),
+        elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f), CircleShape),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(
+                    modifier = Modifier
+                        .background(badgeColor.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                ) {
+                    Text(
+                        text = badgeText,
+                        style = MaterialTheme.typography.bodySmall,
+                        fontWeight = FontWeight.Bold,
+                        color = badgeColor
+                    )
+                }
+            }
+            Spacer(modifier = Modifier.width(8.dp))
+            Icon(
+                imageVector = Icons.Default.KeyboardArrowDown,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.5f),
+                modifier = Modifier.size(24.dp)
+            )
+        }
+    }
+}
+
+@Composable
+fun TileCustomIconLoader(
+    context: Context,
+    tileNum: Int,
+    tileIconType: String,
+    refreshCounter: Int
+) {
+    var bitmap by remember(tileNum, tileIconType, refreshCounter) {
+        mutableStateOf<android.graphics.Bitmap?>(null)
+    }
+
+    LaunchedEffect(tileNum, tileIconType, refreshCounter) {
+        if (tileIconType == "custom") {
+            val loadedBitmap = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                try {
+                    val customIconPath = NotificationHelper.getTileCustomIconPath(context, tileNum)
+                    if (customIconPath != null) {
+                        val file = java.io.File(customIconPath)
+                        if (file.exists()) {
+                            android.graphics.BitmapFactory.decodeFile(file.absolutePath)
+                        } else null
+                    } else null
+                } catch (e: Exception) {
+                    null
+                }
+            }
+            bitmap = loadedBitmap
+        } else {
+            bitmap = null
+        }
+    }
+
+    if (tileIconType == "custom" && bitmap != null) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            modifier = Modifier
+                .clip(RoundedCornerShape(8.dp))
+                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .padding(horizontal = 10.dp, vertical = 6.dp)
+        ) {
+            androidx.compose.foundation.Image(
+                bitmap = bitmap!!.asImageBitmap(),
+                contentDescription = "סמל מותאם נוכחי",
+                modifier = Modifier
+                    .size(24.dp)
+                    .background(Color.DarkGray, shape = CircleShape)
+                    .padding(2.dp)
+            )
+            Spacer(modifier = Modifier.width(8.dp))
+            Text(
+                text = "פעיל",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Bold
+            )
+        }
+    }
+}
+
+@Composable
+fun DeveloperIntentEditDialog(
+    initialIntentUri: String,
+    onDismiss: () -> Unit,
+    onConfirm: (editedUri: String) -> Unit
+) {
+    var editedUri by remember { mutableStateOf(initialIntentUri) }
+    var testError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(
+                    imageVector = Icons.Default.Edit,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("אפשרויות מפתחים - עריכת פקודה", style = MaterialTheme.typography.titleMedium)
+            }
+        },
+        text = {
+            Column(
+                modifier = Modifier.fillMaxWidth(),
+                verticalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Text(
+                    text = "לפני יצירת קיצור הדרך, באפשרותך לצפות ולערוך את פקודת ה-Intent (במבנה URI) שיופעל במערכת:",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+
+                OutlinedTextField(
+                    value = editedUri,
+                    onValueChange = { 
+                        editedUri = it 
+                        testError = null
+                    },
+                    label = { Text("פקודת Intent URI") },
+                    textStyle = androidx.compose.ui.text.TextStyle(
+                        fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace,
+                        fontSize = 11.sp
+                    ),
+                    modifier = Modifier.fillMaxWidth(),
+                    maxLines = 6
+                )
+
+                if (testError != null) {
+                    Text(
+                        text = testError!!,
+                        color = MaterialTheme.colorScheme.error,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                val testIntent = Intent.parseUri(editedUri, Intent.URI_INTENT_SCHEME).apply {
+                                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                }
+                                context.startActivity(testIntent)
+                                android.widget.Toast.makeText(context, "נשלח בהצלחה למערכת לצורך בדיקה", android.widget.Toast.LENGTH_SHORT).show()
+                            } catch (e: Exception) {
+                                testError = "שגיאה בהפעלה: ${e.message}"
+                            }
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Icon(Icons.Default.PlayArrow, contentDescription = null, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(4.dp))
+                        Text("בדוק פקודה", maxLines = 1)
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            Button(
+                onClick = {
+                    try {
+                        Intent.parseUri(editedUri, Intent.URI_INTENT_SCHEME)
+                        onConfirm(editedUri)
+                    } catch (e: Exception) {
+                        testError = "פקודה לא תקינה: ${e.message}"
+                    }
+                }
+            ) {
+                Text("אישור ושמירה")
+            }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) {
+                Text("ביטול")
+            }
+        }
+    )
+}
+
