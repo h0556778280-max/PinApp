@@ -353,17 +353,42 @@ object NotificationHelper {
         return getLaunchIntent(context, target)
     }
 
+    fun getSequenceStepConfigsForId(context: Context, id: String): List<String> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val configStr = prefs.getString("sequence_configs_$id", "") ?: ""
+        val sequenceSize = getSequenceForId(context, id).size
+        val list = (if (configStr.isEmpty()) emptyList() else configStr.split("|||")).toMutableList()
+        while (list.size < sequenceSize) {
+            list.add("")
+        }
+        return list
+    }
+
+    fun saveSequenceStepConfigsForId(context: Context, id: String, configs: List<String>) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString("sequence_configs_$id", configs.joinToString("|||")).apply()
+    }
+
     fun addSequenceTargetForId(context: Context, id: String, target: String) {
         val list = getSequenceForId(context, id).toMutableList()
         list.add(target)
         saveSequenceForId(context, id, list)
+        
+        val configs = getSequenceStepConfigsForId(context, id).toMutableList()
+        configs.add("")
+        saveSequenceStepConfigsForId(context, id, configs)
     }
 
     fun removeSequenceTargetAtForId(context: Context, id: String, index: Int) {
         val list = getSequenceForId(context, id).toMutableList()
+        val configs = getSequenceStepConfigsForId(context, id).toMutableList()
         if (index in list.indices) {
             list.removeAt(index)
             saveSequenceForId(context, id, list)
+            if (index in configs.indices) {
+                configs.removeAt(index)
+                saveSequenceStepConfigsForId(context, id, configs)
+            }
             val currentIndex = getSequenceIndexForId(context, id)
             if (currentIndex >= list.size) {
                 setSequenceIndexForId(context, id, maxOf(0, list.size - 1))
@@ -373,12 +398,20 @@ object NotificationHelper {
 
     fun moveSequenceTargetForId(context: Context, id: String, index: Int, up: Boolean) {
         val list = getSequenceForId(context, id).toMutableList()
+        val configs = getSequenceStepConfigsForId(context, id).toMutableList()
         val targetIndex = if (up) index - 1 else index + 1
         if (index in list.indices && targetIndex in list.indices) {
             val temp = list[index]
             list[index] = list[targetIndex]
             list[targetIndex] = temp
             saveSequenceForId(context, id, list)
+            
+            if (index in configs.indices && targetIndex in configs.indices) {
+                val tempConfig = configs[index]
+                configs[index] = configs[targetIndex]
+                configs[targetIndex] = tempConfig
+                saveSequenceStepConfigsForId(context, id, configs)
+            }
         }
     }
 
@@ -401,23 +434,51 @@ object NotificationHelper {
 
     fun getTriggerIntent(context: Context, type: TriggerType): Intent? {
         if (isSequenceEnabled(context, type)) {
-            return getSequenceNextIntent(context, type)
+            return Intent(context, ActionActivity::class.java).apply {
+                action = "com.example.action.RUN_SEQUENCE"
+                putExtra("trigger_type", type.name)
+            }
         }
         val target = getTargetPackage(context, type) ?: return null
         return getLaunchIntent(context, target)
+    }
+
+    fun getSequenceStepConfigs(context: Context, type: TriggerType): List<String> {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        val configStr = prefs.getString("sequence_configs_${type.name}", "") ?: ""
+        val sequenceSize = getSequence(context, type).size
+        val list = (if (configStr.isEmpty()) emptyList() else configStr.split("|||")).toMutableList()
+        while (list.size < sequenceSize) {
+            list.add("")
+        }
+        return list
+    }
+
+    fun saveSequenceStepConfigs(context: Context, type: TriggerType, configs: List<String>) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putString("sequence_configs_${type.name}", configs.joinToString("|||")).apply()
     }
 
     fun addSequenceTarget(context: Context, type: TriggerType, target: String) {
         val list = getSequence(context, type).toMutableList()
         list.add(target)
         saveSequence(context, type, list)
+        
+        val configs = getSequenceStepConfigs(context, type).toMutableList()
+        configs.add("")
+        saveSequenceStepConfigs(context, type, configs)
     }
 
     fun removeSequenceTargetAt(context: Context, type: TriggerType, index: Int) {
         val list = getSequence(context, type).toMutableList()
+        val configs = getSequenceStepConfigs(context, type).toMutableList()
         if (index in list.indices) {
             list.removeAt(index)
             saveSequence(context, type, list)
+            if (index in configs.indices) {
+                configs.removeAt(index)
+                saveSequenceStepConfigs(context, type, configs)
+            }
             // Adjust index if out of bounds
             val currentIndex = getSequenceIndex(context, type)
             if (currentIndex >= list.size) {
@@ -428,12 +489,20 @@ object NotificationHelper {
 
     fun moveSequenceTarget(context: Context, type: TriggerType, index: Int, up: Boolean) {
         val list = getSequence(context, type).toMutableList()
+        val configs = getSequenceStepConfigs(context, type).toMutableList()
         val targetIndex = if (up) index - 1 else index + 1
         if (index in list.indices && targetIndex in list.indices) {
             val temp = list[index]
             list[index] = list[targetIndex]
             list[targetIndex] = temp
             saveSequence(context, type, list)
+            
+            if (index in configs.indices && targetIndex in configs.indices) {
+                val tempConfig = configs[index]
+                configs[index] = configs[targetIndex]
+                configs[targetIndex] = tempConfig
+                saveSequenceStepConfigs(context, type, configs)
+            }
         }
     }
 
@@ -452,6 +521,44 @@ object NotificationHelper {
         nm.cancel(NOTIFICATION_ID)
     }
 
+    fun getAppName(context: Context, target: String?): String? {
+        if (target == null) return null
+        if (target.startsWith("intent:")) {
+            return try {
+                val intent = Intent.parseUri(target, Intent.URI_INTENT_SCHEME)
+                intent.getStringExtra("PINAPP_INTENT_LABEL") ?: "בקשת מערכת מותאמת"
+            } catch (e: Exception) {
+                "בקשת מערכת"
+            }
+        }
+        val pm = context.packageManager
+        val pkg = if (target.contains("/")) target.split("/")[0] else target
+        val cls = if (target.contains("/")) target.split("/")[1] else null
+        return try {
+            if (cls != null) {
+                val compName = android.content.ComponentName(pkg, cls)
+                val activityInfo = pm.getActivityInfo(compName, 0)
+                val actLabel = activityInfo.loadLabel(pm).toString()
+                val appAi = pm.getApplicationInfo(pkg, 0)
+                val appLabelStr = pm.getApplicationLabel(appAi).toString()
+                if (actLabel != appLabelStr) {
+                    "$appLabelStr - $actLabel"
+                } else {
+                    "$appLabelStr (${cls.substringAfterLast('.')})"
+                }
+            } else {
+                val ai = pm.getApplicationInfo(pkg, 0)
+                pm.getApplicationLabel(ai).toString()
+            }
+        } catch (e: Exception) {
+            if (cls != null) {
+                "${pkg.substringAfterLast('.')}/${cls.substringAfterLast('.')}"
+            } else {
+                pkg
+            }
+        }
+    }
+
     fun updateStatusNotification(context: Context) {
         if (!isNotificationEnabled(context)) return
 
@@ -465,47 +572,11 @@ object NotificationHelper {
         }
 
         val pm = context.packageManager
-        fun getAppName(target: String?): String? {
-            if (target == null) return null
-            if (target.startsWith("intent:")) {
-                return try {
-                    val intent = Intent.parseUri(target, Intent.URI_INTENT_SCHEME)
-                    intent.getStringExtra("PINAPP_INTENT_LABEL") ?: "בקשת מערכת מותאמת"
-                } catch (e: Exception) {
-                    "בקשת מערכת"
-                }
-            }
-            val pkg = if (target.contains("/")) target.split("/")[0] else target
-            val cls = if (target.contains("/")) target.split("/")[1] else null
-            return try {
-                if (cls != null) {
-                    val compName = android.content.ComponentName(pkg, cls)
-                    val activityInfo = pm.getActivityInfo(compName, 0)
-                    val actLabel = activityInfo.loadLabel(pm).toString()
-                    val appAi = pm.getApplicationInfo(pkg, 0)
-                    val appLabelStr = pm.getApplicationLabel(appAi).toString()
-                    if (actLabel != appLabelStr) {
-                        "$appLabelStr - $actLabel"
-                    } else {
-                        "$appLabelStr (${cls.substringAfterLast('.')})"
-                    }
-                } else {
-                    val ai = pm.getApplicationInfo(pkg, 0)
-                    pm.getApplicationLabel(ai).toString()
-                }
-            } catch (e: Exception) {
-                if (cls != null) {
-                    "${pkg.substringAfterLast('.')}/${cls.substringAfterLast('.')}"
-                } else {
-                    pkg
-                }
-            }
-        }
 
         val parts = mutableListOf<String>()
-        getAppName(homePkg)?.let { parts.add("מסך הבית: $it") }
-        getAppName(assistPkg)?.let { parts.add("סייען: $it") }
-        getAppName(cameraPkg)?.let { parts.add("מצלמה: $it") }
+        getAppName(context, homePkg)?.let { parts.add("מסך הבית: $it") }
+        getAppName(context, assistPkg)?.let { parts.add("סייען: $it") }
+        getAppName(context, cameraPkg)?.let { parts.add("מצלמה: $it") }
 
         val statusText = parts.joinToString(" | ")
 
@@ -891,6 +962,26 @@ object NotificationHelper {
         } catch (e: Exception) {
             e.printStackTrace()
         }
+    }
+
+    fun isSequenceAllAtOnce(context: Context, type: TriggerType): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean("sequence_all_at_once_${type.name}", false)
+    }
+
+    fun setSequenceAllAtOnce(context: Context, type: TriggerType, allAtOnce: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("sequence_all_at_once_${type.name}", allAtOnce).apply()
+    }
+
+    fun isSequenceAllAtOnceForId(context: Context, id: String): Boolean {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        return prefs.getBoolean("sequence_all_at_once_$id", false)
+    }
+
+    fun setSequenceAllAtOnceForId(context: Context, id: String, allAtOnce: Boolean) {
+        val prefs = context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+        prefs.edit().putBoolean("sequence_all_at_once_$id", allAtOnce).apply()
     }
 
     fun isDevModeEnabled(context: Context): Boolean {

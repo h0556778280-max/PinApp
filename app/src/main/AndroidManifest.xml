@@ -7,6 +7,19 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.CALL_PHONE" />
+    <uses-permission android:name="android.permission.SEND_SMS" />
+    <uses-permission android:name="android.permission.ANSWER_PHONE_CALLS" />
+    <uses-permission android:name="android.permission.READ_PHONE_STATE" />
+    <uses-permission android:name="android.permission.RECEIVE_SMS" />
+    <uses-permission android:name="android.permission.READ_SMS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     
     <!-- WiFi and Bluetooth Toggle/Control permissions -->
@@ -21,6 +34,7 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.WRITE_SETTINGS" tools:ignore="ProtectedPermissions" />
+    <uses-permission android:name="android.permission.ACCESS_NOTIFICATION_POLICY" />
 
     <application
         android:allowBackup="true"
@@ -121,6 +135,14 @@
                 <action android:name="com.example.action.SET_TIMEOUT_5M" />
                 <action android:name="com.example.action.TOGGLE_ROTATION" />
                 <action android:name="com.example.action.RUN_SEQUENCE" />
+                <action android:name="com.example.action.SEND_SMS_DIRECT" />
+                <action android:name="com.example.action.SWITCH_SPEAKER_ON" />
+                <action android:name="com.example.action.SWITCH_SPEAKER_OFF" />
+                <action android:name="com.example.action.ANSWER_CALL" />
+                <action android:name="com.example.action.MUTE_ON" />
+                <action android:name="com.example.action.MUTE_OFF" />
+                <action android:name="com.example.action.CALL_MUTE_ON" />
+                <action android:name="com.example.action.CALL_MUTE_OFF" />
                 <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>

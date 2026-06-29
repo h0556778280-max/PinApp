@@ -30,6 +30,27 @@ abstract class BaseTileService : TileService() {
 
     fun updateTileState() {
         val tile = qsTile ?: return
+        val type = NotificationHelper.getTileTriggerType(tileId)
+        
+        if (type != null && NotificationHelper.isSequenceEnabled(this, type)) {
+            val index = NotificationHelper.getSequenceIndex(this, type)
+            val configs = NotificationHelper.getSequenceStepConfigs(this, type)
+            val configStr = if (index in configs.indices) configs[index] else ""
+            val parts = configStr.split("|||").let { if (it.size == 1) it[0].split("|") else it }
+            
+            val sequenceTargets = NotificationHelper.getSequence(this, type)
+            val displayLabel = if (parts.size >= 1 && parts[0].isNotEmpty()) parts[0] else "שלב ${index + 1}"
+            val iconResId = if (parts.size >= 2 && parts[1].isNotEmpty()) parts[1].toIntOrNull() ?: android.R.drawable.ic_menu_revert else android.R.drawable.ic_menu_revert
+            val isActive = if (parts.size >= 3 && parts[2].isNotEmpty()) parts[2].toBoolean() else true
+            
+            if (sequenceTargets.isNotEmpty()) {
+                tile.label = displayLabel
+                tile.icon = Icon.createWithResource(this, iconResId)
+                tile.state = if (isActive) android.service.quicksettings.Tile.STATE_ACTIVE else android.service.quicksettings.Tile.STATE_INACTIVE
+                tile.updateTile()
+                return
+            }
+        }
         
         // Load custom label
         val customLabel = NotificationHelper.getTileLabel(this, tileId)
@@ -55,6 +76,7 @@ abstract class BaseTileService : TileService() {
                     val currentTile = qsTile
                     if (currentTile != null && bitmap != null) {
                         currentTile.icon = Icon.createWithBitmap(bitmap)
+                        currentTile.state = android.service.quicksettings.Tile.STATE_INACTIVE
                         currentTile.updateTile()
                     }
                 }
@@ -62,6 +84,7 @@ abstract class BaseTileService : TileService() {
         } else {
             val presetResId = NotificationHelper.getTilePresetIcon(this, tileId)
             tile.icon = Icon.createWithResource(this, presetResId)
+            tile.state = android.service.quicksettings.Tile.STATE_INACTIVE
             tile.updateTile()
         }
     }
